@@ -573,11 +573,21 @@ fn handle_session_notification_inner(
                     .subagent_views
                     .contains_key(session_notif.session_id.0.as_ref())
                     || (agent.session.session_id.as_ref() == Some(&session_notif.session_id)
-                        && matches!(
-                            &session_notif.update,
-                            GrowSessionUpdate::SubagentSpawned { parent_session_id, .. }
-                                if parent_session_id == session_notif.session_id.0.as_ref()
-                        ))
+                        && match &session_notif.update {
+                            GrowSessionUpdate::SubagentSpawned {
+                                parent_session_id, ..
+                            } => {
+                                parent_session_id == session_notif.session_id.0.as_ref()
+                                    || agent
+                                        .session
+                                        .subagent_sessions
+                                        .contains_key(parent_session_id)
+                            }
+                            GrowSessionUpdate::SubagentFinished {
+                                child_session_id, ..
+                            } => agent.subagent_views.contains_key(child_session_id),
+                            _ => false,
+                        })
             })
         })
         .map(SessionMatch::Child)
@@ -1080,6 +1090,7 @@ fn handle_session_notification_inner(
                 child_cwd: None,
                 worktree_path: None,
                 child_updates_replayed: false,
+                history_unavailable: false,
             };
             let existing_finished = agent
                 .session
@@ -1244,7 +1255,7 @@ fn handle_session_notification_inner(
                         info.pending_kill = false;
                         info.kill_requested_at = None;
                     }
-                } else {
+                } else if !meta.is_task_state_only_replay() {
                     let block = crate::scrollback::blocks::SubagentBlock::started(
                         &description,
                         &child_session_id,
@@ -1369,7 +1380,7 @@ fn handle_session_notification_inner(
                 .and_then(|s| s.model.as_ref())
                 .map(|model| model.to_string());
             sync_subagent_activity(agent, &child_session_id, None);
-            if !already_finished && !is_workflow_child {
+            if !already_finished && !is_workflow_child && !meta.is_task_state_only_replay() {
                 let block = match status.as_str() {
                     "completed" => RenderBlock::Subagent(
                         crate::scrollback::blocks::SubagentBlock::completed(
@@ -1628,7 +1639,9 @@ fn handle_session_notification_inner(
             });
             true
         }
-        update @ GrowSessionUpdate::WorkflowUpdated { .. } => agent.ingest_workflow_update(update),
+        update @ GrowSessionUpdate::WorkflowUpdated { .. } => {
+            agent.ingest_workflow_update(update, meta.is_task_state_only_replay())
+        }
         GrowSessionUpdate::GoalUpdated {
             goal_id,
             objective,

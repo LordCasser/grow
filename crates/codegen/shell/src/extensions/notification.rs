@@ -61,6 +61,28 @@ pub struct SessionNotification {
     pub meta: Option<serde_json::Value>,
 }
 
+pub const SCHEDULER_LOAD_SNAPSHOT_META_KEY: &str = "grow/schedulerSnapshot";
+
+/// The resident scheduler projection attached to `session/load`. This is a
+/// read snapshot of the scheduler owner, not a persisted Timeline event.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulerLoadSnapshot {
+    pub generation: String,
+    pub revision: u64,
+    pub tasks: Vec<ScheduledTaskLoadSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskLoadSnapshot {
+    pub task_id: String,
+    pub prompt: String,
+    pub human_schedule: String,
+    pub next_fire_at: Option<String>,
+    pub last_subagent_id: Option<String>,
+}
+
 /// One passive slice of a large historical Tool display payload. `json` is a
 /// UTF-8 slice of the canonical JSON object containing the Tool's display
 /// fields; concatenate slices with matching `source_position` and `digest` to

@@ -88,6 +88,7 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -145,6 +146,7 @@ fn session_loaded_models_do_not_overwrite_new_session_default() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -181,6 +183,7 @@ fn session_reload_reissues_matching_deferred_behavior_to_clear_confirmation() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -220,6 +223,7 @@ fn session_reload_reissues_unresolved_deferred_behavior_before_prompt_drain() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -336,6 +340,7 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -363,6 +368,7 @@ fn deferred_latest_history_can_fail_and_retry_after_live_input() {
             descendant_ownership: None,
             history_cut: Some("cut".into()),
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -484,6 +490,7 @@ fn history_page_for_load(
         older_cursor,
         newer_cursor: None,
         target_source: None,
+        descendant_ownership: None,
     }
 }
 
@@ -541,6 +548,7 @@ fn session_loaded_purges_replay_transient() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -567,6 +575,7 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -625,6 +634,7 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -665,6 +675,7 @@ fn session_loaded_without_restore_no_summary() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -712,6 +723,7 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -805,6 +817,7 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -877,6 +890,7 @@ fn session_loaded_combines_pending_first_prompt_before_typed_prompt() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -988,6 +1002,7 @@ fn loading_replay_ignores_input_and_preserves_existing_draft_until_session_loade
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -1072,6 +1087,7 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );
@@ -1176,6 +1192,7 @@ fn session_loaded_clears_stale_running_entries() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );

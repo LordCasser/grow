@@ -809,6 +809,10 @@ resident load 的 Behavior 查询和回包复核共用 Shell 的持久化可用�
 
 Minimal 的 PageUp 通过同一 ScrollbackPane 打开临时历史屏，Esc 返回 native live。首次 Latest 页的 pending 实体正常提交一次；以后读页保持既有实体的 pending/committed 事实，只将新引入的旧历史标为已提交。浏览暂停 native commit，退出后的实时内容继续从原 frontier 提交。临时 alternate screen 的清理由现有 terminal teardown 负责，同批双 Ctrl+D 没有最后 draw 时也须归还终端。实现边界与最终验收见 [本次恢复修复](../openspec/changes/archive/2026-11-17-repair-session-resume-presentation/design.md) 和 [验证记录](../openspec/changes/archive/2026-11-17-repair-session-resume-presentation/verification.md)。
 
+Pager 从实际采用的 Latest、Before、After 或 Around 页读取同截点的子任务归属，沿直接委派关系恢复嵌套子任务。达到 1 MiB 上限而省略 load 的可选归属时，历史页仍提供所需的归属。`Ended` 通过 `grow/taskStateOnly` 补齐任务栏，正文生命周期行仍由各自的历史页投影。子任务缺少 Result 时保留已确认的前置失败终态，详情读取仍校验 Seed 及已有的 Result 引用。见 [分页子任务恢复契约](../openspec/specs/client-surfaces/spec.md#requirement-history-pages-restore-exact-subagent-navigation-and-terminal-state)。
+
+同一 resident 会话有多个客户端时，新客户端的 `session/load` 会收到当前 Workflow tracker 的定向 `grow/taskStateOnly` 更新，以及 scheduler owner 的 `grow/schedulerSnapshot`。排查 Workflow 比对 revision 和活跃子任务数。排查定时任务比对各任务的版本、下次触发时间和最近触发的子任务 ID。子视图的 TODO 来自该子会话的 Plan，有更新的实时 Plan 时，延迟读取的历史不会覆盖它。见 [Workflow 状态契约](../openspec/specs/client-surfaces/spec.md#requirement-resident-loads-restore-the-current-workflow-task-state)、[定时任务状态契约](../openspec/specs/client-surfaces/spec.md#requirement-session-load-restores-resident-scheduler-state)和[子 TODO 契约](../openspec/specs/task-planning/spec.md#requirement-child-todo-projections-follow-live-and-replayed-plans)。
+
 Scrollback 的 viewport 锚点由布局 owner 持有。正文锚点保存逻辑行与 sub-row；entry 后的 gap 单独保存相对末尾的行偏移，前插和换宽后随原 EntryId 的新位置及高度恢复。估算布局转为精确测量时也保持 gap pin，正文仍按新逻辑行范围夹紧。见 [gap 锚点契约](../openspec/specs/client-surfaces/spec.md#requirement-scrollback-gap-anchors-follow-their-preceding-entry)。
 
 上下文 metadata 使用 `contextUsedTokens`，与 `PromptUsage.totals.totalTokens` 的消费含义分开。lifetime 和逻辑 Turn 的消费来自原结算账本；稳定 `TurnId/prompt_id` 决定结算归属，prompt index 只核对位置。活动 Turn 的账本复用既有 UsageCheckpoint 恢复，完成用量随原 TurnCompleted 展示事实冻结留存。查看历史不会重新累计，session-only 迟到账单也不会改写已冻结结果；未知费用和不完整标记必须保留。状态栏的 `recorded tokens` 表示已记录消费，`pending` 表示仍有活动工作可能追加结算，不能据此写入持久 incomplete。

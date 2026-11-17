@@ -671,6 +671,8 @@ pub struct AgentView {
     /// Sticky: once the user types in the prompt, hide the tip for the session.
     pub tip_typing_dismissed: bool,
     pub todo: TodoPane,
+    /// A live child Plan is newer than any transcript Plan still awaiting deferred replay.
+    pub(crate) child_todo_plan_received_live: bool,
     pub tasks: TasksPane,
     pub catalog: SubagentCatalogPane,
     pub queue: QueuePane,
@@ -1984,6 +1986,7 @@ pub(crate) mod test_fixtures {
             child_cwd: None,
             worktree_path: None,
             child_updates_replayed: false,
+            history_unavailable: false,
         }
     }
     /// Count of "Worked for X" (`TurnCompleted`) marker blocks in the

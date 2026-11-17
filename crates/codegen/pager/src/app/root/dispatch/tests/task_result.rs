@@ -117,6 +117,7 @@ fn history_page(
         older_cursor,
         newer_cursor,
         target_source: None,
+        descendant_ownership: None,
     }
 }
 

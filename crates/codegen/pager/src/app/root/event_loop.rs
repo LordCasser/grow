@@ -126,6 +126,7 @@ struct AgentLoadOutcome {
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
     descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
     behavior: Option<shell::extensions::notification::BehaviorProjection>,
+    scheduler_snapshot: Option<shell::extensions::notification::SchedulerLoadSnapshot>,
 }
 
 /// Fields of the reconnect `session/load`, derived from the agent being
@@ -2313,6 +2314,9 @@ pub(crate) async fn run(
                                                 behavior: crate::app::session::AgentSession::behavior_projection_from_meta(
                                                     resp.meta.as_ref(),
                                                 ),
+                                                scheduler_snapshot: crate::acp::meta::session_load_scheduler_snapshot(
+                                                    resp.meta.as_ref(),
+                                                ),
                                             });
                                         }
                                         Err(e) => {
@@ -2327,6 +2331,7 @@ pub(crate) async fn run(
                                                 foreground: None,
                                                 descendant_ownership: None,
                                                 behavior: None,
+                                                scheduler_snapshot: None,
                                             });
                                         }
                                     }
@@ -2470,6 +2475,11 @@ pub(crate) async fn run(
                             if let Some(behavior) = load.as_ref().and_then(|load| load.behavior.clone()) {
                                 crate::app::acp_handler::hydrate_behavior_projection(agent, behavior);
                             }
+                            if let Some(snapshot) =
+                                load.as_ref().and_then(|load| load.scheduler_snapshot.clone())
+                            {
+                                agent.session.apply_scheduler_snapshot(snapshot);
+                            }
                         }
                         finalized && ok
                     } else {
@@ -2484,6 +2494,7 @@ pub(crate) async fn run(
                                 &mut app,
                                 *id,
                                 load.and_then(|load| load.descendant_ownership),
+                                None,
                             ),
                         );
                         if let Some(agent) = app.agents.get_mut(id) {
@@ -4121,6 +4132,7 @@ mod tests {
                 foreground: None,
                 descendant_ownership: None,
                 behavior: None,
+                scheduler_snapshot: None,
             },
         );
         loads.insert(
@@ -4133,6 +4145,7 @@ mod tests {
                 foreground: None,
                 descendant_ownership: None,
                 behavior: None,
+                scheduler_snapshot: None,
             },
         );
         let pending = vec![active, background];
@@ -4167,6 +4180,7 @@ mod tests {
                 foreground: None,
                 descendant_ownership: None,
                 behavior: None,
+                scheduler_snapshot: None,
             },
         );
         loads.insert(
@@ -4179,6 +4193,7 @@ mod tests {
                 foreground: None,
                 descendant_ownership: None,
                 behavior: None,
+                scheduler_snapshot: None,
             },
         );
         let pending = vec![active, background];
@@ -4209,6 +4224,7 @@ mod tests {
                 foreground: None,
                 descendant_ownership: None,
                 behavior: None,
+                scheduler_snapshot: None,
             },
         );
         let pending = vec![active];
@@ -4250,6 +4266,7 @@ mod tests {
                 foreground: None,
                 descendant_ownership: None,
                 behavior: None,
+                scheduler_snapshot: None,
             },
         );
         let pending = vec![background];

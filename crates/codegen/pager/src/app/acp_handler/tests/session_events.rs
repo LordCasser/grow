@@ -1964,6 +1964,16 @@
                 vec!["child obligation"],
             );
 
+            assert!(handle(make_plan_message("plan-child", &["live child plan"]), &mut app));
+            assert_eq!(todo_contents(&app, root), vec!["root obligation"]);
+            assert!(app.agents[&root].subagent_views["plan-child"]
+                .child_todo_plan_received_live);
+            assert_eq!(
+                app.agents[&root].subagent_views["plan-child"]
+                    .todo.todos().iter().map(|item| item.content.clone()).collect::<Vec<_>>(),
+                vec!["live child plan"],
+            );
+
             assert!(handle(make_plan_message("plan-root", &["explicit root replacement"]), &mut app));
             assert_eq!(todo_contents(&app, root), vec!["explicit root replacement"]);
         }

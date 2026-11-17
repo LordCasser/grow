@@ -1,0 +1,5 @@
+- [x] Add scheduler snapshot metadata to resident `session/load` responses using the existing List command and scheduler state.
+- [x] Reconcile Pager scheduled-task state from load and reconnect-resync snapshots using a complete-snapshot revision floor, per-task live versions, generation fencing, and delete tombstones.
+- [x] Add regressions for snapshot restoration and replay cleanup, out-of-order revisions across tasks, old-generation rejection, and absent one-shot fires.
+- [x] Repeat the isolated two-client Leader/ACP reproduction and record the load snapshot evidence.
+- [x] Run focused validation and `openspec validate --all --strict --no-interactive`.

@@ -61,7 +61,9 @@ use routing::{
     resolve_target_view,
 };
 
-pub(crate) use background::{apply_task_backgrounded, apply_task_completed};
+pub(crate) use background::{
+    apply_scheduler_load_snapshot, apply_task_backgrounded, apply_task_completed,
+};
 pub(crate) use settings::apply_models_state_update;
 pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
@@ -714,11 +716,21 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         }
                         let mode_observation =
                             observe_mode_update(&notif.request.update, child_view, !meta.is_replay);
-                        child_view.session.handle_update(
-                            notif.request.update,
-                            &meta,
-                            &mut child_view.scrollback,
-                        );
+                        match notif.request.update {
+                            acp::SessionUpdate::Plan(plan) => {
+                                if !meta.is_replay {
+                                    child_view.child_todo_plan_received_live = true;
+                                }
+                                child_view.apply_child_todo_plan(plan);
+                            }
+                            update => {
+                                child_view.session.handle_update(
+                                    update,
+                                    &meta,
+                                    &mut child_view.scrollback,
+                                );
+                            }
+                        }
                         for entry_id in child_view.session.tracker.take_pending_edit_hl() {
                             child_view.submit_edit_highlight(entry_id);
                         }

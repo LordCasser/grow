@@ -135,6 +135,7 @@
                         descendant_ownership: None,
                         history_cut: None,
                         behavior: None,
+                    scheduler_snapshot: None,
                     },
                 ),
                 &mut app,

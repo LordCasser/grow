@@ -37,7 +37,7 @@ pub use legacy_replay_oracle::{PreparedReplay, prepare_replay_lines};
 
 mod descendant_recovery;
 pub use descendant_recovery::{
-    ChildReplaySpawn, DESCENDANT_OWNERSHIP_META_KEY, DescendantOwnership,
+    ChildReplaySpawn, DESCENDANT_OWNERSHIP_META_KEY, DescendantChildReplay, DescendantOwnership,
     load_descendant_child_replay_at, load_descendant_ownership_at, load_descendant_replay_at,
 };
 
@@ -3822,6 +3822,8 @@ pub struct HistoryPageResponse {
     pub newer_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_source: Option<HistorySourceKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descendant_ownership: Option<DescendantOwnership>,
 }
 
 /// `grow/read_history_timeline` request. `cut` is the history page cut.

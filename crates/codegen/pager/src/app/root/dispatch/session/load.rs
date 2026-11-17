@@ -709,6 +709,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
             app,
             agent_id,
             descendant_ownership,
+            None,
         ));
         return effects;
     }

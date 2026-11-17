@@ -38,6 +38,14 @@ pub(crate) fn session_load_descendant_ownership(
         .then_some(ownership)
 }
 
+pub(crate) fn session_load_scheduler_snapshot(
+    response_meta: Option<&acp::Meta>,
+) -> Option<shell::extensions::notification::SchedulerLoadSnapshot> {
+    let value =
+        response_meta?.get(shell::extensions::notification::SCHEDULER_LOAD_SNAPSHOT_META_KEY)?;
+    serde_json::from_value(value.clone()).ok()
+}
+
 /// Parsed fields from `SessionNotification._meta`.
 ///
 /// Extracted once in [`acp_handler`](super::super::app::acp_handler) and passed

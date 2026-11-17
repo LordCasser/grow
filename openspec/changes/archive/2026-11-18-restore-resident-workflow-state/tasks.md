@@ -1,0 +1,2 @@
+- [x] Add targeted resident Workflow projection and retain Workflow revision ordering in Pager.
+- [x] Repeat the two-client fault reproduction against a rebuilt CLI and verify state-only Pager adoption.

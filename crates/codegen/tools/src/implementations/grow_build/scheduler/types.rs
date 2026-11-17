@@ -22,6 +22,14 @@ impl SchedulerVersion {
         self.generation
     }
 
+    pub fn generation_string(self) -> String {
+        self.generation.to_string()
+    }
+
+    pub fn revision_number(self) -> u64 {
+        self.revision
+    }
+
     #[cfg(test)]
     pub(super) fn from_parts(generation: uuid::Uuid, revision: u64) -> Self {
         Self {
@@ -299,6 +307,16 @@ pub struct SchedulerSnapshot {
     #[allow(dead_code)]
     pub(crate) version: SchedulerVersion,
     pub tasks: Vec<ScheduledTask>,
+}
+
+impl SchedulerSnapshot {
+    pub fn generation(&self) -> String {
+        self.version.generation_string()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.version.revision_number()
+    }
 }
 
 /// Handle for tools to communicate with the SchedulerActor.

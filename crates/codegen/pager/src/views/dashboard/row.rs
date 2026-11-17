@@ -1168,6 +1168,7 @@ mod tests {
             workflow_run_id: None,
             context_normalized: false,
             child_updates_replayed: false,
+            history_unavailable: false,
             parent_prompt_id: None,
             started_at: now,
             last_progress_at: now,

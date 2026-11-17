@@ -132,6 +132,7 @@ impl AgentView {
             self.session.last_seen_event_id = None;
             self.session.last_applied_event_seq = None;
             self.session.last_applied_grow_event_seq = None;
+            self.child_todo_plan_received_live = false;
             self.clear_minimal_btw_lifecycle();
         }
         self.session.session_id = Some(session_id);
@@ -152,6 +153,7 @@ impl AgentView {
             self.descendant_restore_pending = false;
             self.descendant_model_control_generation = 0;
             self.descendant_agent_control_generation = 0;
+            self.child_todo_plan_received_live = false;
             self.clear_minimal_btw_lifecycle();
         }
     }
@@ -250,6 +252,7 @@ impl AgentView {
             prompt,
             tip_typing_dismissed: false,
             todo: TodoPane::new(),
+            child_todo_plan_received_live: false,
             tasks: TasksPane::new(),
             catalog: SubagentCatalogPane::new(),
             queue: QueuePane::new(),
@@ -591,8 +594,22 @@ impl AgentView {
     /// `session/load` replay. The transcript is NOT cleared — it stays
     /// recoverable until [`finish_session_reload`](Self::finish_session_reload)
     /// decides the outcome.
+    pub(crate) fn apply_child_todo_plan(&mut self, plan: acp_transport::protocol::Plan) {
+        self.todo.update_todos(
+            plan.entries
+                .into_iter()
+                .map(shell::tools::todo::todo_item_from_plan_entry)
+                .collect(),
+        );
+        self.mark_reload_todo_update();
+    }
+
     fn rearm_controls_for_reconnect_recursively(&mut self) {
         self.session.rearm_controls_for_reconnect();
+        // A prior live Plan only outranks transcript history within the
+        // current connection. Reconnect may have persisted newer child
+        // planning facts while this view was detached.
+        self.child_todo_plan_received_live = false;
         for child in self.subagent_views.values_mut() {
             child.rearm_controls_for_reconnect_recursively();
         }
@@ -1963,6 +1980,7 @@ mod resolve_turn_activity_tests {
                 child_cwd: None,
                 worktree_path: None,
                 child_updates_replayed: false,
+                history_unavailable: false,
             },
         );
         let meta = NotificationMeta::default();

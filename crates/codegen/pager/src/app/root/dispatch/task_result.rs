@@ -559,7 +559,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             descendant_ownership,
             history_cut,
             behavior,
+            scheduler_snapshot,
         } => {
+            let snapshot_session_id = session_id.clone();
             let mut effects = handle_session_loaded(
                 app,
                 agent_id,
@@ -572,6 +574,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 history_cut,
                 behavior,
             );
+            if let Some(snapshot) = scheduler_snapshot {
+                crate::app::acp_handler::apply_scheduler_load_snapshot(
+                    app,
+                    &snapshot_session_id,
+                    snapshot,
+                );
+            }
             effects.extend(crate::app::agent_view::ensure_visible_history_timeline(app));
             effects
         }
@@ -580,6 +589,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_id,
             binding_epoch,
             request_id,
+            history_cut,
             child_control_captures,
             batch,
         } => {
@@ -589,13 +599,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 &session_id,
                 binding_epoch,
                 request_id,
+                history_cut.as_deref(),
                 &child_control_captures,
                 batch,
             );
             vec![]
         }
         TaskResult::HistoryPageLoaded {
-            agent_id: _,
+            agent_id,
             session_id,
             binding_epoch,
             request_id,
@@ -605,6 +616,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         } => {
             let visible = crate::app::agent_view::visible_history_session(app);
             let mut effects = Vec::new();
+            let mut page_ownership = None;
             {
                 let Some(agent) = super::ctx::find_agent_view_by_session_id(
                     &mut app.agents,
@@ -626,11 +638,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     result.as_ref().map(|page| page.rows.len()).unwrap_or(0),
                 );
                 match result {
-                    Ok(response) => {
+                    Ok(mut response) => {
                         if response.session_id != session_id {
                             return vec![];
                         }
                         let target_source = response.target_source;
+                        let cut = response.cut.clone();
+                        let ownership = response.descendant_ownership.take();
                         let forward = matches!(
                             query,
                             shell::session::storage::HistoryPageQuery::After { .. }
@@ -645,6 +659,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                 agent.show_toast(&format!("Could not load history: {reason}"));
                             }
                             crate::app::agent_view::HistoryPageOutcome::Adopted => {
+                                page_ownership = ownership.map(|ownership| (ownership, cut));
                                 if around {
                                     agent.reveal_adopted_timeline_target(target_source);
                                 } else if visible.as_ref() == Some(&session_id) {
@@ -665,6 +680,21 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         ));
                     }
                 }
+            }
+            if let Some((ownership, cut)) = page_ownership
+                && ownership.belongs_to(session_id.0.as_ref())
+                && app
+                    .agents
+                    .get(&agent_id)
+                    .and_then(|root| root.session.session_id.as_ref())
+                    == Some(&session_id)
+            {
+                effects.extend(crate::app::subagent::schedule_descendant_state_restore(
+                    app,
+                    agent_id,
+                    Some(ownership),
+                    Some(cut),
+                ));
             }
             effects.extend(crate::app::agent_view::ensure_visible_history_timeline(app));
             effects
@@ -744,6 +774,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
             descendant_ownership,
             behavior,
+            scheduler_snapshot,
         } => {
             let Some(agent) = app.agents.get_mut(&agent_id) else {
                 return vec![];
@@ -767,10 +798,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent.show_toast(&format!("Session resync failed: {error}. Reload to retry."));
                 return vec![];
             }
+            if let Some(snapshot) = scheduler_snapshot {
+                crate::app::acp_handler::apply_scheduler_load_snapshot(app, &session_id, snapshot);
+            }
             let mut effects = crate::app::subagent::schedule_descendant_state_restore(
                 app,
                 agent_id,
                 descendant_ownership,
+                None,
             );
             effects.extend(
                 app.agents

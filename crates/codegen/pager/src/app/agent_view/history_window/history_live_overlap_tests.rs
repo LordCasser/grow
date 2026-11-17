@@ -122,6 +122,7 @@ fn latest_page(
         older_cursor,
         newer_cursor: None,
         target_source: None,
+        descendant_ownership: None,
     }
 }
 

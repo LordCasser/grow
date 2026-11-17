@@ -1195,6 +1195,41 @@ impl MvpAgent {
         }
         completions.push(self.gateway.forward_with_completion(notification));
     }
+    pub(super) async fn publish_resident_workflow_state(
+        &self,
+        session_id: &acp::SessionId,
+        actor: &mpsc::UnboundedSender<crate::session::SessionCommand>,
+        persist_data: Option<&serde_json::Value>,
+        target_client_id: Option<&serde_json::Value>,
+    ) -> Result<(), acp::Error> {
+        use crate::extensions::notification::SessionNotification;
+        use crate::session::workflow::notify::build_workflow_updated;
+
+        let updates = {
+            let sessions = self.sessions.borrow();
+            let handle = sessions.get(session_id)
+                .filter(|handle| handle.cmd_tx.same_channel(actor) && !actor.is_closed())
+                .ok_or_else(|| acp::Error::internal_error().data("Session ended before Workflow state was observed."))?;
+            let tracker = handle.workflow_tracker.lock();
+            tracker.list().iter()
+                .map(|run| build_workflow_updated(run, tracker.elapsed_ms(&run.run_id), 0))
+                .collect::<Vec<_>>()
+        };
+        let mut meta = serde_json::json!({"isReplay": true, "grow/taskStateOnly": true});
+        if let Some(value) = persist_data { meta["grow/persist"] = value.clone(); }
+        if let Some(value) = target_client_id { meta["grow/leaderClientId"] = value.clone(); }
+        for update in updates {
+            let notification = SessionNotification { session_id: session_id.clone(), update, meta: Some(meta.clone()) };
+            let raw = serde_json::value::to_raw_value(&notification)
+                .expect("Workflow state serializes");
+            self.gateway.forward_with_completion(acp::ExtNotification::new("grow/session/update", Arc::from(raw)))
+                .await
+                .map_err(|_| acp::Error::internal_error().data("Workflow state delivery was interrupted."))?
+                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn replay_session_updates(
         &self,
         session_id: &acp::SessionId,

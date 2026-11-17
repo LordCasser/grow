@@ -278,6 +278,7 @@ fn skills_binding_open_reload_toggle_and_session_ready_producers_capture_epoch()
                 descendant_ownership: None,
                 history_cut: None,
                 behavior: None,
+                scheduler_snapshot: None,
             }
         } else {
             TaskResult::SessionCreated {

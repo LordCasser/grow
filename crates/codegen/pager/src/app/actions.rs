@@ -1324,6 +1324,7 @@ pub enum Effect {
         session_id: acp::SessionId,
         binding_epoch: u32,
         request_id: u64,
+        history_cut: Option<String>,
         root_child_session_ids: Vec<String>,
         child_control_captures: Vec<crate::app::subagent::DescendantControlCapture>,
         ownership: Option<shell::session::storage::DescendantOwnership>,
@@ -2341,12 +2342,14 @@ pub enum TaskResult {
         /// Opaque `grow/historyCut` token. It is not a paging cursor.
         history_cut: Option<String>,
         behavior: Option<shell::extensions::notification::BehaviorProjection>,
+        scheduler_snapshot: Option<shell::extensions::notification::SchedulerLoadSnapshot>,
     },
     DescendantStateRestored {
         agent_id: AgentId,
         session_id: acp::SessionId,
         binding_epoch: u32,
         request_id: u64,
+        history_cut: Option<String>,
         child_control_captures: Vec<crate::app::subagent::DescendantControlCapture>,
         batch: crate::app::subagent::DescendantReplayBatch,
     },
@@ -2393,6 +2396,7 @@ pub enum TaskResult {
         result: Result<Option<crate::app::prompt_queue::ForegroundSnapshot>, String>,
         descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
         behavior: Option<shell::extensions::notification::BehaviorProjection>,
+        scheduler_snapshot: Option<shell::extensions::notification::SchedulerLoadSnapshot>,
     },
     /// Local `summary.json` title read for [`Effect::HydrateSessionTitleFromDisk`].
     SessionTitleFromDisk {

@@ -5577,3 +5577,85 @@ Scrollback SHALL 在viewport顶端位于entry后的布局间隙时保留该间�
 #### Scenario: A stale unfinished task is reconciled after paged load
 - **WHEN** 同cut任务状态中保留未结算start，随后既有冷恢复reconciliation送达终态
 - **THEN** 中心任务行正确终结，state-only恢复不先追加一份正文或完成通知。
+
+### Requirement: Selected direct subagents retain their terminal state during paged resume
+
+Pager SHALL use the matching canonical terminal at the selected history cut to settle any unfinished task row for a direct child selected by descendant restoration. The task state SHALL be independent of whether the transcript page containing its terminal has arrived. A synthesized lifecycle update for this purpose SHALL NOT add a transcript block, advance the history cursor, or dispatch child work. An already displayed terminal for the same child SHALL be preserved.
+
+#### Scenario: A selected child ended outside the loaded transcript page
+- **WHEN** paged resume selects a direct child and its matching canonical terminal, while no terminal transcript row has been loaded
+- **THEN** the task row retains the recorded outcome and elapsed time, the child is idle, and the task does not expose cancellation or make the root wait for a running child.
+
+#### Scenario: Restore overlaps a terminal or an open child
+- **WHEN** a selected child already has a terminal in the view, or a different selected child has only a canonical spawn
+- **THEN** restoration keeps the existing terminal and leaves the open child active without creating additional transcript lifecycle rows.
+
+### Requirement: History pages restore exact subagent navigation and terminal state
+
+Each adopted history page SHALL supply the child ownership required by the subagent rows in that page from the same validated cut, including exact ancestors for nested children. A view SHALL bind these facts to the requesting session, load generation and cut. Page adoption SHALL preserve the canonical direct parent and lifecycle-root coordinates, terminal state, and availability of the corresponding child view. A confirmed pre-launch failure SHALL display its outcome independently of Result availability. Child history traversal SHALL verify its Seed and any required Result before use. The existing optional 1 MiB load metadata budget SHALL NOT suppress ownership selected by the page.
+
+#### Scenario: An archived child appears in a page
+- **WHEN** an adopted Latest, Before, After or Around page names a child whose spawn is outside the loaded transcript or working set
+- **THEN** the exact child can be inspected, its terminal state comes from the same cut, and no additional lifecycle row is inserted.
+
+#### Scenario: The optional load payload is too large
+- **WHEN** the 1 MiB budget omits optional load ownership and the client adopts a page containing a child
+- **THEN** the child and its required ancestors are still resolved against that page's cut.
+
+#### Scenario: A nested child lacks terminal presentation
+- **WHEN** a selected nested child has a matching Ended in the lifecycle root and a valid direct parent edge
+- **THEN** the task keeps the canonical terminal, even without a Finished presentation row, and does not offer cancellation or obstruct the root as a running child.
+
+#### Scenario: Startup fails before child storage exists
+- **WHEN** the root records an exact terminal for a selected delegation without a child result or a child session
+- **THEN** the task displays the recorded outcome and no live cancellation or child detail is offered for the unavailable session.
+
+### Requirement: Resident loads restore the current Workflow task state
+
+A resident session/load SHALL give the loading client the current tracked Workflow revisions after history replay and before successful load completion. A Workflow snapshot SHALL follow the existing revision ordering and clear semantics. Applying the snapshot SHALL update task state without adding a historical transcript row or starting work.
+
+#### Scenario: A second client joins while a Workflow child runs
+- **WHEN** client A observes a newer live Workflow revision with a running child and client B attaches to the same resident session
+- **THEN** client B receives the current revision and running child at load completion, including changes newer than the last durable display row.
+
+#### Scenario: An existing client has a newer revision
+- **WHEN** the view already observed a newer update or a clear
+- **THEN** an older load snapshot does not replace that state, and applying the snapshot does not alter the transcript.
+
+### Requirement: Session load restores resident scheduler state
+
+When `session/load` attaches to a resident session, it SHALL return the current scheduler snapshot from that session's scheduler owner. The snapshot SHALL include the scheduler generation and revision and every current task's next fire time and last admitted subagent identity. Pager SHALL reconcile its scheduled-task projection from this snapshot after replay and SHALL ignore scheduler notifications older than the adopted snapshot version.
+
+#### Scenario: Load after a recurring task fired
+
+- **WHEN** a resident recurring scheduled task fires and a second client then loads the same session
+- **THEN** the load snapshot restores the advanced `next_fire_at` and fired child identity, even when historical replay contains only the earlier creation event
+
+#### Scenario: Scheduler notification races load snapshot adoption
+
+- **WHEN** a live scheduler notification arrives before or after the load response with a generation/revision older than the adopted snapshot
+- **THEN** Pager keeps the snapshot's task state and does not roll back its next fire time or child link
+
+#### Scenario: Newer notification races an older multi-task snapshot
+- **WHEN** a notification advances or deletes task A after snapshot version N, before Pager adopts snapshot N, while the snapshot also contains an unchanged task B
+- **THEN** Pager preserves task A's newer state (or deletion) and still refreshes task B from snapshot N
+- **AND** replay-only tasks absent from snapshot N are removed unless a newer notification changed that task
+
+#### Scenario: Different task notifications arrive out of revision order
+- **WHEN** task A receives revision 12 and task B's revision 11 notification arrives afterward, with a complete snapshot floor at revision 10
+- **THEN** Pager applies both updates by their per-task versions
+- **AND** the revision 12 update for task A does not reject task B's revision 11 update
+
+#### Scenario: A newer scheduler generation starts before its snapshot
+- **WHEN** a live notification from a newer scheduler generation arrives before that generation's complete snapshot
+- **THEN** Pager accepts events from that generation without applying the prior generation's revision floor
+- **AND** Pager ignores late live events from older generations
+
+#### Scenario: An absent one-shot fires after the complete snapshot
+- **WHEN** a fire notification with no next fire time arrives for a task absent from the current snapshot
+- **THEN** Pager does not create a scheduled-task row for it
+
+#### Scenario: No resident scheduler is available
+
+- **WHEN** session load has no resident scheduler handle
+- **THEN** no scheduler snapshot is included and existing replay behavior remains available

@@ -148,7 +148,11 @@ impl AgentView {
     /// Apply one workflow projection update together with its transcript
     /// block. Keeping both writes behind one view-domain method prevents ACP
     /// routing from exposing a partially updated workflow to rendering.
-    pub(crate) fn ingest_workflow_update(&mut self, update: GrowSessionUpdate) -> bool {
+    pub(crate) fn ingest_workflow_update(
+        &mut self,
+        update: GrowSessionUpdate,
+        state_only: bool,
+    ) -> bool {
         let GrowSessionUpdate::WorkflowUpdated {
             run_id,
             definition_id,
@@ -235,6 +239,9 @@ impl AgentView {
                 None => self.session.workflow_runs.push(snapshot),
             }
         }
+        if state_only {
+            return true;
+        }
         let active = agents.iter().filter(|a| a.state == "running").count() as u32;
         upsert_workflow_block(
             self,
@@ -284,12 +291,39 @@ mod tests {
     }
 
     #[test]
+    fn resident_state_advances_revision_without_adding_history() {
+        let mut agent = test_agent_view(Some("s1"), PathBuf::from("/tmp"));
+        assert!(agent.ingest_workflow_update(update("run-1", 4, "active"), false));
+        let body_len = agent.scrollback.len();
+        let mut snapshot = update("run-1", 7, "active");
+        let GrowSessionUpdate::WorkflowUpdated { agents, .. } = &mut snapshot else {
+            unreachable!();
+        };
+        agents.push(shell::extensions::notification::WorkflowAgentInfo {
+            agent_id: "child".into(),
+            label: "work-1".into(),
+            phase: Some("work".into()),
+            model: None,
+            state: "running".into(),
+            tokens_used: 0,
+            duration_ms: 0,
+        });
+        assert!(agent.ingest_workflow_update(snapshot, true));
+        assert!(!agent.ingest_workflow_update(update("run-1", 6, "active"), true));
+        assert_eq!(agent.session.workflow_runs[0].active_agents, 1);
+        assert_eq!(agent.scrollback.len(), body_len);
+        assert!(agent.ingest_workflow_update(update("run-1", 8, "cleared"), false));
+        assert!(!agent.ingest_workflow_update(update("run-1", 7, "active"), true));
+        assert!(agent.session.workflow_runs.is_empty());
+    }
+
+    #[test]
     fn stale_positive_clear_does_not_remove_newer_live_run() {
         let mut agent = test_agent_view(Some("s1"), PathBuf::from("/tmp"));
-        assert!(agent.ingest_workflow_update(update("run-1", 7, "active")));
+        assert!(agent.ingest_workflow_update(update("run-1", 7, "active"), false));
         let block_id = agent.workflow_blocks["run-1"];
 
-        assert!(!agent.ingest_workflow_update(update("run-1", 6, "cleared")));
+        assert!(!agent.ingest_workflow_update(update("run-1", 6, "cleared"), false));
         assert_eq!(agent.session.workflow_runs.len(), 1);
         assert_eq!(agent.session.workflow_runs[0].status, "active");
         assert_eq!(agent.session.workflow_run_revisions.get("run-1"), Some(&7));
@@ -305,9 +339,9 @@ mod tests {
     #[test]
     fn newer_clear_and_revisionless_compatibility_preserve_run_history() {
         let mut agent = test_agent_view(Some("s1"), PathBuf::from("/tmp"));
-        assert!(agent.ingest_workflow_update(update("run-1", 7, "active")));
+        assert!(agent.ingest_workflow_update(update("run-1", 7, "active"), false));
         let block_id = agent.workflow_blocks["run-1"];
-        assert!(agent.ingest_workflow_update(update("run-1", 8, "cleared")));
+        assert!(agent.ingest_workflow_update(update("run-1", 8, "cleared"), false));
         assert!(agent.session.workflow_runs.is_empty());
         assert_eq!(agent.session.workflow_run_revisions.get("run-1"), Some(&8));
         assert!(agent.session.cleared_workflow_runs.contains("run-1"));
@@ -318,14 +352,14 @@ mod tests {
                 .get_by_id(block_id)
                 .is_some_and(|entry| !entry.is_running)
         );
-        assert!(!agent.ingest_workflow_update(update("run-1", 8, "active")));
+        assert!(!agent.ingest_workflow_update(update("run-1", 8, "active"), false));
 
-        assert!(agent.ingest_workflow_update(update("legacy", 2, "active")));
-        assert!(agent.ingest_workflow_update(update("legacy", 0, "cleared")));
+        assert!(agent.ingest_workflow_update(update("legacy", 2, "active"), false));
+        assert!(agent.ingest_workflow_update(update("legacy", 0, "cleared"), false));
         assert_eq!(agent.session.workflow_run_revisions.get("legacy"), Some(&2));
         assert!(agent.session.cleared_workflow_runs.contains("legacy"));
-        assert!(!agent.ingest_workflow_update(update("legacy", 0, "active")));
-        assert!(agent.ingest_workflow_update(update("new-run", 1, "active")));
+        assert!(!agent.ingest_workflow_update(update("legacy", 0, "active"), false));
+        assert!(agent.ingest_workflow_update(update("new-run", 1, "active"), false));
         assert_eq!(agent.session.workflow_runs.len(), 1);
         assert_eq!(agent.session.workflow_runs[0].run_id, "new-run");
     }

@@ -86,6 +86,7 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         child_cwd: None,
         worktree_path: None,
         child_updates_replayed: false,
+        history_unavailable: false,
     }
 }
 #[test]
@@ -456,6 +457,31 @@ pub(super) fn make_fired_notif_with_subagent(
             subagent_id: subagent_id.into(),
         },
         meta: None,
+    };
+    let raw = serde_json::value::to_raw_value(&notif).unwrap();
+    acp::ExtNotification::new("grow/scheduled_task_fired", std::sync::Arc::from(raw))
+}
+pub(super) fn make_versioned_fired_notif(
+    session_id: &str,
+    task_id: &str,
+    next_fire_at: Option<&str>,
+    subagent_id: &str,
+    generation: &str,
+    revision: u64,
+) -> acp::ExtNotification {
+    let notif = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: GrowSessionUpdate::ScheduledTaskFired {
+            task_id: task_id.into(),
+            prompt: format!("prompt-{task_id}"),
+            human_schedule: "every 1 minute".into(),
+            next_fire_at: next_fire_at.map(str::to_owned),
+            subagent_id: subagent_id.into(),
+        },
+        meta: Some(serde_json::json!({
+            "grow/schedulerGeneration": generation,
+            "grow/schedulerRevision": revision,
+        })),
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
     acp::ExtNotification::new("grow/scheduled_task_fired", std::sync::Arc::from(raw))

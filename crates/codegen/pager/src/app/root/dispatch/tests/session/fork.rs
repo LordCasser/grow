@@ -220,6 +220,7 @@ fn fork_initiation_supersedes_open_reload_window() {
             descendant_ownership: None,
             history_cut: None,
             behavior: None,
+            scheduler_snapshot: None,
         }),
         &mut app,
     );

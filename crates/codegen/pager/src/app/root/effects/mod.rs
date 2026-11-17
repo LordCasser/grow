@@ -907,6 +907,7 @@ pub(crate) fn execute(
             session_id,
             binding_epoch,
             request_id,
+            history_cut,
             root_child_session_ids,
             child_control_captures,
             ownership,
@@ -935,6 +936,7 @@ pub(crate) fn execute(
                     session_id,
                     binding_epoch,
                     request_id,
+                    history_cut,
                     child_control_captures,
                     batch,
                 }
@@ -1018,6 +1020,9 @@ pub(crate) fn execute(
                                 foreground,
                                 history_cut,
                                 behavior: crate::app::session::AgentSession::behavior_projection_from_meta(
+                                    resp.meta.as_ref(),
+                                ),
+                                scheduler_snapshot: crate::acp::meta::session_load_scheduler_snapshot(
                                     resp.meta.as_ref(),
                                 ),
                             }
@@ -1228,14 +1233,27 @@ pub(crate) fn execute(
                             crate::app::session::AgentSession::behavior_projection_from_meta(
                                 response.meta.as_ref(),
                             ),
+                            crate::acp::meta::session_load_scheduler_snapshot(
+                                response.meta.as_ref(),
+                            ),
                         ))
                         .map_err(|error| sanitize_user_error(&error.to_string()))
                 });
-                let (result, descendant_ownership, behavior) = match result {
-                    Ok((foreground, ownership, behavior)) => (Ok(foreground), ownership, behavior),
-                    Err(error) => (Err(error), None, None),
+                let (result, descendant_ownership, behavior, scheduler_snapshot) = match result {
+                    Ok((foreground, ownership, behavior, scheduler_snapshot)) => (
+                        Ok(foreground), ownership, behavior, scheduler_snapshot,
+                    ),
+                    Err(error) => (Err(error), None, None, None),
                 };
-                TaskResult::SessionResynced { agent_id, session_id, generation, result, descendant_ownership, behavior }
+                TaskResult::SessionResynced {
+                    agent_id,
+                    session_id,
+                    generation,
+                    result,
+                    descendant_ownership,
+                    behavior,
+                    scheduler_snapshot,
+                }
             });
         }
         Effect::FetchSessionList { cwd, query, seq, .. } => {

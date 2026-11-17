@@ -203,6 +203,23 @@ async fn settled_child_is_available_to_exact_queries_after_cold_load() {
         .prepare_indexed(&parent.id, &restored.timeline)
         .unwrap();
     let pages = restored.history.indexed_pages(prepared).unwrap().unwrap();
+    let window = pages
+        .read_before(&parent.id, crate::session::history::PagePosition::newest())
+        .unwrap();
+    let page_ownership = ownership
+        .for_page(&window.rows, restored.history.indexed.as_ref())
+        .unwrap()
+        .unwrap();
+    assert!(page_ownership.belongs_to(parent.id.0.as_ref()));
+    let ended = page_ownership.spawns[child.id.0.as_ref()]
+        .terminal
+        .as_ref()
+        .unwrap();
+    assert_eq!(ended.outcome, SubagentOutcome::Cancelled);
+    assert!(
+        ended.result_ref.is_none(),
+        "the parent terminal needs no child result for presentation"
+    );
     let (_, page) = pages
         .page_before(&parent.id, crate::session::history::PagePosition::newest())
         .unwrap();
@@ -236,6 +253,73 @@ async fn settled_child_is_available_to_exact_queries_after_cold_load() {
     assert_eq!(captured.parent_spawn_seq, spawn.seq.get());
     assert_eq!(captured.spawn.subagent_id, "agent-child");
     assert_eq!(captured.spawn.child_session_id, child.id.0.as_ref());
+}
+
+#[tokio::test]
+async fn page_ownership_survives_omitted_load_metadata_and_resolves_nested_ancestors() {
+    use chat_state::{SubagentEvent, SubagentOutcome, SubagentTerminalEvent, TimelineEventKind};
+
+    let root = info("parent-root", "/workspace/root");
+    let child = info("child", "/workspace/child");
+    let nested = info("nested", "/workspace/nested");
+    let mut parent_spawn = spawn(&root, &child);
+    parent_spawn.prompt = "x".repeat(1024 * 1024 + 1);
+    let mut nested_spawn = spawn(&child, &nested);
+    nested_spawn.subagent_id = "agent-nested".into();
+    let mut timeline = chat_state::Timeline::default();
+    for spawn in [parent_spawn, nested_spawn] {
+        timeline
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                Box::new(spawn),
+            )))
+            .unwrap();
+    }
+    let terminal = SubagentTerminalEvent {
+        subagent_id: "agent-nested".into(),
+        child_session_id: nested.id.0.to_string(),
+        outcome: SubagentOutcome::Failed,
+        duration_ms: 10,
+        tool_calls: 0,
+        turns: 0,
+        tokens_used: 0,
+        result_ref: None,
+        snapshot_ref: None,
+        error: Some("worktree could not be created".into()),
+    };
+    timeline
+        .record(TimelineEventKind::Subagent(SubagentEvent::Ended(
+            terminal.clone(),
+        )))
+        .unwrap();
+    let history = HistorySnapshot {
+        prefix_hash: "1".repeat(64),
+        positions: vec![5],
+        ..Default::default()
+    };
+    let ownership = DescendantOwnership::from_validated(root.id.0.as_ref(), &timeline, &history);
+    assert!(ownership.clone().into_load_meta().is_none());
+    let rows = [super::super::HistoryRow {
+        source: super::super::HistorySourceKey { record: 4, part: 0 },
+        entity: None,
+        fragment: None,
+        update: grow(
+            &root,
+            "nested-finished",
+            crate::agent::subagent::finish_from_terminal(&terminal, None),
+        ),
+    }];
+    let selected = ownership.for_page(&rows, None).unwrap().unwrap();
+    assert!(selected.belongs_to(root.id.0.as_ref()));
+    assert_eq!(
+        selected.replayed_child_ids().collect::<Vec<_>>(),
+        vec!["child", "nested"]
+    );
+    assert_eq!(
+        selected.spawns["nested"].spawn.security_parent_session_id,
+        "child"
+    );
+    assert_eq!(selected.spawns["nested"].terminal.as_ref(), Some(&terminal));
+    assert!(selected.spawns["child"].spawn.prompt.is_empty());
 }
 
 #[tokio::test]
@@ -541,6 +625,32 @@ async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered
         .append_timeline_event_durable(&child, &nested_spawn_event)
         .await
         .unwrap();
+    use tool_types::planning::{LocalPlan, PlanPriority, PlanStep, PlanStepStatus, PlanUpdateMode};
+    let mut plan = LocalPlan::new(child.id.to_string(), "child planning");
+    plan.update_steps(
+        PlanUpdateMode::Merge,
+        vec![PlanStep {
+            id: "step".into(),
+            content: "persisted child TODO".into(),
+            priority: PlanPriority::Normal,
+            status: PlanStepStatus::Pending,
+            requirements: None,
+            removed: false,
+        }],
+    )
+    .unwrap();
+    let plan_event = child_timeline
+        .record(TimelineEventKind::Planning(
+            chat_state::timeline::PlanningEvent {
+                previous: None,
+                plan: Box::new(plan),
+            },
+        ))
+        .unwrap();
+    adapter
+        .append_timeline_event_durable(&child, &plan_event)
+        .await
+        .unwrap();
     let mut grandchild_timeline = chat_state::Timeline::default();
     let grandchild_seed = grandchild_timeline
         .record(TimelineEventKind::SubagentSeed(
@@ -671,7 +781,7 @@ async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered
     drop(loaded);
     drop(publisher);
 
-    let (ownership, presentation) = load_descendant_child_replay_at(
+    let replay = load_descendant_child_replay_at(
         child.id.0.as_ref(),
         parent.id.0.as_ref(),
         &owner_spawn,
@@ -679,13 +789,19 @@ async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered
     )
     .unwrap()
     .unwrap();
-    assert!(ownership.is_complete());
+    assert!(replay.ownership.is_complete());
+    assert_eq!(
+        replay.plan.unwrap().entries[0].content,
+        "persisted child TODO"
+    );
     assert!(
-        ownership
+        replay
+            .ownership
             .into_spawns()
             .contains_key(grandchild.id.0.as_ref())
     );
-    let lifecycle = presentation
+    let lifecycle = replay
+        .lifecycle
         .iter()
         .filter_map(|notification| match &notification.update {
             GrowUpdate::SubagentSpawned { .. } => Some("spawned"),

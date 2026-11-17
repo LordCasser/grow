@@ -658,6 +658,26 @@ impl IndexedHistory {
         Ok(Vec::new())
     }
 
+    pub(crate) fn subagent_events_for_child(
+        &self,
+        child: &str,
+    ) -> io::Result<Vec<chat_state::TimelineEvent>> {
+        #[cfg(unix)]
+        {
+            let cut = self.tools.cut(self.clone())?;
+            chat_state::timeline::ExecutionHistory::subagent_events_for_child(
+                &cut,
+                child,
+                chat_state::EventSeq::new(self.execution_frontier().domain),
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+            Ok(Vec::new())
+        }
+    }
+
     pub(crate) fn notice_source(
         &self,
         identity: &(String, Option<String>, Option<String>),

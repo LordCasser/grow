@@ -4820,7 +4820,7 @@ mod usage_status_tests {
             "elapsed_ms": 100
         }))
         .unwrap();
-        assert!(agent.ingest_workflow_update(workflow));
+        assert!(agent.ingest_workflow_update(workflow, false));
         assert!(!agent.session.workflow_runs.is_empty());
         let mut goal = GoalDisplayState::test_stub();
         goal.status = crate::app::session::GoalDisplayStatus::Complete;

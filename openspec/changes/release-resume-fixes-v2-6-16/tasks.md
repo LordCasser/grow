@@ -1,0 +1,3 @@
+- [x] Confirm official latest and update patch metadata and notes.
+- [x] Complete local checks, independent re-review and fixed CLI reproductions.
+- [ ] Validate the clean annotated tag, run official release gates and verify publication.

@@ -82,6 +82,8 @@ pub struct SubagentInfo {
     /// Set after the first `replay_inherited_updates` attempt (spawn or open).
     /// Prevents duplicate replay when scrollback is prompt-only after spawn.
     pub child_updates_replayed: bool,
+    /// The terminal delegation has no verified child transcript to open.
+    pub history_unavailable: bool,
 }
 impl SubagentInfo {
     /// Whether the subagent is currently running (not finished).
@@ -200,7 +202,9 @@ fn enrich_projected_subagent(
         );
         return;
     }
-    info.prompt = Some(Arc::from(spawn.spawn.prompt.as_str()));
+    if !spawn.spawn.prompt.is_empty() {
+        info.prompt = Some(Arc::from(spawn.spawn.prompt.as_str()));
+    }
     info.child_cwd = Some(Arc::from(spawn.spawn.child_cwd.as_str()));
     info.worktree_path = spawn.spawn.worktree_path.as_deref().map(Arc::from);
     if let Some(child) = root.subagent_views.get_mut(child_session_id) {
@@ -232,11 +236,18 @@ pub(crate) fn replay_inherited_updates(
             let mut meta =
                 crate::acp::meta::NotificationMeta::from_json(notification.meta.as_ref());
             meta.is_replay = true;
-            child_view.session.handle_update(
-                notification.update,
-                &meta,
-                &mut child_view.scrollback,
-            );
+            match notification.update {
+                acp_transport::protocol::SessionUpdate::Plan(plan) => {
+                    if !child_view.child_todo_plan_received_live {
+                        child_view.apply_child_todo_plan(plan);
+                    }
+                }
+                update => {
+                    child_view
+                        .session
+                        .handle_update(update, &meta, &mut child_view.scrollback);
+                }
+            }
             // Writer restoration reseeds transport IDs above the durable
             // history. Keep the ACP watermark separate from Grow updates so
             // queued copies of replayed tool/user events cannot render twice.
@@ -353,6 +364,7 @@ pub struct DescendantReplayNode {
     pub parent_session_id: String,
     pub durable_children: std::collections::BTreeMap<String, ChildReplaySpawn>,
     pub lifecycle: Vec<shell::extensions::notification::SessionNotification>,
+    pub plan: Option<acp_transport::protocol::Plan>,
 }
 
 #[derive(Debug, Default)]
@@ -435,7 +447,7 @@ pub(crate) fn read_descendant_replay_batch(
         if !visited.insert(parent_session_id.clone()) {
             continue;
         }
-        let (ownership, lifecycle) = match shell::session::storage::load_descendant_child_replay_at(
+        let replay = match shell::session::storage::load_descendant_child_replay_at(
             &parent_session_id,
             &owner_session_id,
             &owner_spawn,
@@ -452,8 +464,10 @@ pub(crate) fn read_descendant_replay_batch(
                 continue;
             }
         };
-        let durable_children = ownership.into_spawns();
-        for notification in &lifecycle {
+        let mut durable_children = replay.ownership.into_spawns();
+        durable_children
+            .retain(|_, spawn| spawn.spawn.security_parent_session_id == parent_session_id);
+        for notification in &replay.lifecycle {
             if let SessionUpdate::SubagentSpawned {
                 subagent_id,
                 parent_session_id: lifecycle_parent,
@@ -475,7 +489,8 @@ pub(crate) fn read_descendant_replay_batch(
         batch.nodes.push(DescendantReplayNode {
             parent_session_id,
             durable_children,
-            lifecycle,
+            lifecycle: replay.lifecycle,
+            plan: replay.plan,
         });
     }
     batch
@@ -488,6 +503,7 @@ pub(crate) fn schedule_descendant_state_restore(
     app: &mut crate::app::root::AppView,
     root_agent_id: crate::app::session::AgentId,
     ownership: Option<DescendantOwnership>,
+    history_cut: Option<String>,
 ) -> Vec<crate::app::actions::Effect> {
     let Some(root) = app.agents.get_mut(&root_agent_id) else {
         return Vec::new();
@@ -505,13 +521,16 @@ pub(crate) fn schedule_descendant_state_restore(
             agent_generation: child.descendant_agent_control_generation,
         })
         .collect();
-    root.descendant_restore_generation = root.descendant_restore_generation.wrapping_add(1);
-    root.descendant_restore_pending = true;
+    if history_cut.is_none() {
+        root.descendant_restore_generation = root.descendant_restore_generation.wrapping_add(1);
+        root.descendant_restore_pending = true;
+    }
     vec![crate::app::actions::Effect::RestoreDescendantState {
         agent_id: root_agent_id,
         session_id,
         binding_epoch: root.session_binding_epoch,
         request_id: root.descendant_restore_generation,
+        history_cut,
         root_child_session_ids: root.session.subagent_sessions.keys().cloned().collect(),
         child_control_captures,
         ownership,
@@ -527,22 +546,46 @@ pub(crate) fn apply_descendant_state_restore(
     session_id: &agent_client_protocol::schema::v1::SessionId,
     binding_epoch: u32,
     request_id: u64,
+    history_cut: Option<&str>,
     child_control_captures: &[DescendantControlCapture],
-    batch: DescendantReplayBatch,
+    mut batch: DescendantReplayBatch,
 ) {
     let Some(root) = app.agents.get(&root_agent_id) else {
         return;
     };
     if root.session.session_id.as_ref() != Some(session_id)
         || root.session_binding_epoch != binding_epoch
-        || root.descendant_restore_generation != request_id
-        || !root.descendant_restore_pending
+        || !match history_cut {
+            Some(cut) => root.history_cut() == Some(cut),
+            None => {
+                root.descendant_restore_generation == request_id && root.descendant_restore_pending
+            }
+        }
     {
         return;
     }
     let previous_loading_replay = root.session.loading_replay;
     if let Some(root) = app.agents.get_mut(&root_agent_id) {
-        root.descendant_restore_pending = false;
+        if history_cut.is_none() {
+            root.descendant_restore_pending = false;
+            for node in &mut batch.nodes {
+                if let Some(plan) = node.plan.take()
+                    && root
+                        .session
+                        .subagent_sessions
+                        .get(&node.parent_session_id)
+                        .is_some_and(|info| info.child_updates_replayed)
+                    && let Some(child) = root.subagent_views.get_mut(&node.parent_session_id)
+                    && !child.child_todo_plan_received_live
+                    && child_control_captures.iter().any(|capture| {
+                        capture.child_session_id == node.parent_session_id
+                            && capture.binding_epoch == child.session_binding_epoch
+                    })
+                {
+                    child.apply_child_todo_plan(plan);
+                }
+            }
+        }
         root.session.loading_replay = true;
     }
     apply_descendant_replay_batch(app, root_agent_id, child_control_captures, batch);
@@ -601,26 +644,32 @@ pub(crate) fn apply_descendant_replay_batch(
         .filter(|child| batch.root_spawns.contains_key(*child))
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    if let Some(root) = app.agents.get_mut(&root_agent_id) {
-        for (child_session_id, spawn) in &batch.root_spawns {
-            if replayed_direct_children.contains(child_session_id) {
-                enrich_projected_subagent(root, child_session_id, spawn);
-            }
-        }
+    let mut children_by_parent = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for child in &replayed_direct_children {
+        let spawn = &batch.root_spawns[child];
+        children_by_parent
+            .entry(&spawn.spawn.security_parent_session_id)
+            .or_default()
+            .push(child);
     }
-    for child_session_id in &replayed_direct_children {
-        let missing_view = app
-            .agents
-            .get(&root_agent_id)
-            .is_some_and(|root| !root.subagent_views.contains_key(child_session_id));
-        let Some(spawn) = batch.root_spawns.get(child_session_id) else {
-            continue;
-        };
-        if missing_view {
-            apply_projected_root_spawn(app, root_agent_id, spawn);
-            if let Some(root) = app.agents.get_mut(&root_agent_id) {
-                enrich_projected_subagent(root, child_session_id, spawn);
-            }
+    let Some(root_session_id) = app
+        .agents
+        .get(&root_agent_id)
+        .and_then(|root| root.session.session_id.clone())
+    else {
+        return;
+    };
+    let readable_children = batch
+        .nodes
+        .iter()
+        .map(|node| node.parent_session_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut parents = std::collections::VecDeque::from([root_session_id.0.as_ref()]);
+    while let Some(parent) = parents.pop_front() {
+        for child in children_by_parent.remove(parent).into_iter().flatten() {
+            let spawn = &batch.root_spawns[child];
+            apply_projected_child(app, root_agent_id, spawn, readable_children.contains(child));
+            parents.push_back(child);
         }
     }
     let captured_direct_children = batch.replayed_direct_children;
@@ -716,15 +765,69 @@ pub(crate) fn apply_descendant_replay_batch(
                 enrich_projected_subagent(root, &child, spawn);
             }
         }
+        for spawn in node.durable_children.values() {
+            apply_projected_terminal(app, root_agent_id, spawn);
+        }
     }
 }
 
-fn apply_projected_root_spawn(
+fn apply_projected_child(
+    app: &mut crate::app::root::AppView,
+    root_agent_id: crate::app::session::AgentId,
+    spawn: &ChildReplaySpawn,
+    readable: bool,
+) {
+    let child = &spawn.spawn.child_session_id;
+    let missing_view = app
+        .agents
+        .get(&root_agent_id)
+        .is_some_and(|root| !root.subagent_views.contains_key(child));
+    if missing_view {
+        apply_projected_spawn(app, root_agent_id, spawn);
+    }
+    if let Some(root) = app.agents.get_mut(&root_agent_id) {
+        enrich_projected_subagent(root, child, spawn);
+    }
+    apply_projected_terminal(app, root_agent_id, spawn);
+    if !readable
+        && spawn
+            .terminal
+            .as_ref()
+            .is_some_and(|terminal| missing_view || terminal.result_ref.is_none())
+        && let Some(root) = app.agents.get_mut(&root_agent_id)
+        && let Some(info) = root.session.subagent_sessions.get_mut(child)
+    {
+        info.history_unavailable = true;
+        root.subagent_views.remove(child);
+    }
+}
+
+fn apply_projected_terminal(
+    app: &mut crate::app::root::AppView,
+    root_agent_id: crate::app::session::AgentId,
+    spawn: &ChildReplaySpawn,
+) {
+    if app
+        .agents
+        .get(&root_agent_id)
+        .and_then(|root| {
+            root.session
+                .subagent_sessions
+                .get(&spawn.spawn.child_session_id)
+        })
+        .is_some_and(|info| info.subagent_id.as_ref() == spawn.spawn.subagent_id && !info.finished)
+        && let Some(update) = spawn.terminal_update()
+    {
+        apply_projected_state(app, root_agent_id, update);
+    }
+}
+
+fn apply_projected_spawn(
     app: &mut crate::app::root::AppView,
     owner_agent_id: crate::app::session::AgentId,
     spawn: &ChildReplaySpawn,
 ) {
-    use shell::extensions::notification::{SessionNotification, SessionUpdate};
+    use shell::extensions::notification::SessionUpdate;
 
     let event = &spawn.spawn;
     let effective_context_source = match event.context_source {
@@ -732,11 +835,10 @@ fn apply_projected_root_spawn(
         chat_state::SubagentContextSource::Forked => "forked",
         chat_state::SubagentContextSource::Resumed => "resumed",
     };
-    let update = SessionNotification {
-        session_id: agent_client_protocol::schema::v1::SessionId::new(
-            event.security_parent_session_id.clone(),
-        ),
-        update: SessionUpdate::SubagentSpawned {
+    apply_projected_state(
+        app,
+        owner_agent_id,
+        SessionUpdate::SubagentSpawned {
             subagent_id: event.subagent_id.clone(),
             parent_session_id: event.security_parent_session_id.clone(),
             parent_prompt_id: event.parent_prompt_id.clone(),
@@ -756,9 +858,27 @@ fn apply_projected_root_spawn(
             workflow_run_id: event.workflow_run_id.clone(),
             goal_id: event.goal_id.clone(),
         },
-        meta: Some(serde_json::json!({"isReplay": true})),
+    );
+}
+
+fn apply_projected_state(
+    app: &mut crate::app::root::AppView,
+    owner_agent_id: crate::app::session::AgentId,
+    update: shell::extensions::notification::SessionUpdate,
+) {
+    let Some(session_id) = app
+        .agents
+        .get(&owner_agent_id)
+        .and_then(|root| root.session.session_id.clone())
+    else {
+        return;
     };
-    let Ok(raw) = serde_json::value::to_raw_value(&update) else {
+    let notification = shell::extensions::notification::SessionNotification {
+        session_id,
+        update,
+        meta: Some(serde_json::json!({"isReplay": true, "grow/taskStateOnly": true})),
+    };
+    let Ok(raw) = serde_json::value::to_raw_value(&notification) else {
         return;
     };
     let ext = agent_client_protocol::schema::v1::ExtNotification::new(
@@ -1127,6 +1247,7 @@ mod tests {
             child_cwd: None,
             worktree_path: None,
             child_updates_replayed: false,
+            history_unavailable: false,
         }
     }
     fn make_min_child_view() -> AgentView {
@@ -1983,6 +2104,18 @@ mod tests {
             shell::session::storage::SessionUpdate::Acp(Box::new(notification))
         };
         let lines = [
+            acp_update(
+                9,
+                agent_client_protocol::schema::v1::SessionUpdate::Plan(
+                    agent_client_protocol::schema::v1::Plan::new(vec![
+                        agent_client_protocol::schema::v1::PlanEntry::new(
+                            "replayed child TODO",
+                            agent_client_protocol::schema::v1::PlanEntryPriority::Medium,
+                            agent_client_protocol::schema::v1::PlanEntryStatus::Pending,
+                        ),
+                    ]),
+                ),
+            ),
             grow_update(
                 10,
                 GrowUpdate::ImageRecoveryOperation {
@@ -2022,6 +2155,85 @@ mod tests {
         assert_eq!(
             replay_inherited_updates(&mut child, child_sid),
             Some(ReplayEmission::Emitted)
+        );
+        assert_eq!(
+            child
+                .todo
+                .todos()
+                .iter()
+                .map(|item| item.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["replayed child TODO"],
+        );
+
+        let mut reconnect_root = make_min_child_view();
+        reconnect_root.session.session_id = Some(acp::SessionId::new("plan-root"));
+        let mut reconnect_child = make_min_child_view();
+        reconnect_child.child_todo_plan_received_live = true;
+        reconnect_child.todo.update_todos(Vec::new());
+        reconnect_root.insert_subagent_view(child_sid.to_owned(), Box::new(reconnect_child));
+        reconnect_root.begin_session_reload(1);
+        assert_eq!(
+            reconnect_root
+                .session
+                .session_id
+                .as_ref()
+                .map(|id| id.0.as_ref()),
+            Some("plan-root"),
+            "reconnect retains the same session identity"
+        );
+        assert!(
+            !reconnect_root.subagent_views[child_sid].child_todo_plan_received_live,
+            "same-identity reconnect clears only the previous connection's precedence"
+        );
+        assert_eq!(
+            replay_inherited_updates(
+                reconnect_root.subagent_views.get_mut(child_sid).unwrap(),
+                child_sid
+            ),
+            Some(ReplayEmission::Emitted)
+        );
+        assert!(
+            reconnect_root.subagent_views[child_sid]
+                .todo
+                .todos()
+                .iter()
+                .any(|item| item.content == "replayed child TODO"),
+            "the persisted Plan applies after same-identity reconnect"
+        );
+
+        let reconnect_child = reconnect_root.subagent_views.get_mut(child_sid).unwrap();
+        reconnect_child.child_todo_plan_received_live = true;
+        reconnect_child
+            .todo
+            .update_todos(vec![shell::tools::todo::TodoItem {
+                content: "new live Plan".into(),
+                priority: shell::tools::todo::TodoPriority::Medium,
+                status: shell::tools::todo::TodoStatus::Pending,
+                meta: None,
+            }]);
+        assert_eq!(
+            replay_inherited_updates(reconnect_child, child_sid),
+            Some(ReplayEmission::Emitted)
+        );
+        assert_eq!(
+            reconnect_child
+                .todo
+                .todos()
+                .iter()
+                .map(|item| item.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new live Plan"],
+            "a live Plan arriving during reconnect must outrank older history"
+        );
+        reconnect_child.todo.update_todos(Vec::new());
+        assert_eq!(
+            replay_inherited_updates(reconnect_child, child_sid),
+            Some(ReplayEmission::Emitted)
+        );
+        assert!(
+            reconnect_child.todo.todos().is_empty(),
+            "an empty live Plan during reconnect must also outrank older history"
         );
         set_replay_grow_home_for_tests(None);
 

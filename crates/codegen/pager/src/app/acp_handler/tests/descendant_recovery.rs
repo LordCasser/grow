@@ -33,6 +33,7 @@ fn apply_descendant_restore_effect(app: &mut AppView, effects: Vec<crate::app::a
         session_id,
         binding_epoch,
         request_id,
+        history_cut,
         root_child_session_ids,
         child_control_captures,
         ownership,
@@ -53,6 +54,7 @@ fn apply_descendant_restore_effect(app: &mut AppView, effects: Vec<crate::app::a
         &session_id,
         binding_epoch,
         request_id,
+        history_cut.as_deref(),
         &child_control_captures,
         batch,
     );
@@ -192,6 +194,7 @@ fn captured_ownership_enriches_existing_replayed_child_after_disk_disappears() {
                     descendant_ownership: Some(captured),
                     history_cut: None,
                     behavior: None,
+                    scheduler_snapshot: None,
                 },
             ),
             &mut app,
@@ -275,6 +278,237 @@ fn terminal_only_page_bootstraps_exact_child_view_without_a_started_row() {
             })
             .count();
         assert_eq!(rows, 1, "the terminal row remains the only visible lifecycle block");
+    });
+}
+
+#[test]
+fn selected_child_with_off_page_terminal_does_not_restore_as_running() {
+    with_replay_disk_home(|home| {
+        let root_sid = "paged-root";
+        let child_sid = "paged-child";
+        write_subagent_spawn_timeline(home, root_sid, child_sid, "historical child");
+        let mut spawns = shell::session::storage::load_descendant_ownership_at(root_sid, home)
+            .unwrap()
+            .unwrap()
+            .into_spawns();
+        let spawn = spawns.get_mut(child_sid).unwrap();
+        spawn.terminal = Some(chat_state::SubagentTerminalEvent {
+            subagent_id: child_sid.into(),
+            child_session_id: child_sid.into(),
+            outcome: chat_state::SubagentOutcome::Cancelled,
+            duration_ms: 4321,
+            tool_calls: 2,
+            turns: 1,
+            tokens_used: 37,
+            error: Some("cancelled by user".into()),
+            result_ref: Some(chat_state::TimelineRangeRef {
+                timeline_id: child_sid.into(),
+                first_seq: 2,
+                last_seq: 2,
+            }),
+            snapshot_ref: None,
+        });
+
+        let mut app = make_app_with_agent(root_sid);
+        let root = app.agents.get_mut(&AgentId(0)).unwrap();
+        root.session.state = crate::app::session::AgentState::TurnRunning;
+        let body_len = root.scrollback.len();
+        for _ in 0..2 {
+            crate::app::subagent::apply_descendant_replay_batch(
+                &mut app,
+                AgentId(0),
+                &[],
+                crate::app::subagent::DescendantReplayBatch {
+                    root_spawns: spawns.clone(),
+                    replayed_direct_children: std::collections::HashSet::from([child_sid.into()]),
+                    nodes: vec![crate::app::subagent::DescendantReplayNode {
+                        parent_session_id: child_sid.to_owned(),
+                        durable_children: Default::default(),
+                        lifecycle: Vec::new(),
+                        plan: None,
+                    }],
+                },
+            );
+            let root = &app.agents[&AgentId(0)];
+            let child = &root.session.subagent_sessions[child_sid];
+            assert!(!child.is_running());
+            assert!(!child.pending_kill);
+            assert_eq!(child.status.as_deref(), Some("cancelled"));
+            assert_eq!(child.duration_ms, Some(4321));
+            assert_eq!(child.tokens_used, Some(37));
+            assert!(matches!(
+                root.subagent_views[child_sid].session.state,
+                crate::app::session::AgentState::Idle
+            ));
+            assert!(!matches!(
+                root.resolve_turn_activity(),
+                Some(crate::acp::tracker::TurnActivity::Waiting(
+                    crate::acp::tracker::WaitingReason::Subagent
+                ))
+            ));
+            assert_eq!(root.scrollback.len(), body_len);
+        }
+    });
+}
+
+#[test]
+fn two_adopted_pages_can_restore_same_cut_in_reverse_order() {
+    use crate::app::actions::{Action, TaskResult};
+    use shell::session::storage::{
+        HistoryPageQuery, HistoryPageResponse, HistoryRow, HistorySourceKey, SessionUpdate,
+    };
+
+    with_replay_disk_home(|home| {
+        let root_sid = "two-pages";
+        let session_id = acp::SessionId::new(root_sid);
+        let mut app = make_app_with_agent(root_sid);
+        app.agents.get_mut(&AgentId(0)).unwrap().arm_history_load(Some("cut".into()));
+        let mut effects = Vec::new();
+        for (child, request_id, record, query) in [
+            ("page-a", 1, 2, HistoryPageQuery::Latest),
+            ("page-b", 2, 1, HistoryPageQuery::Before { cursor: "older".into() }),
+        ] {
+            write_subagent_spawn_timeline(home, root_sid, child, "a task");
+            let ownership = shell::session::storage::load_descendant_ownership_at(root_sid, home)
+                .unwrap().unwrap();
+            let mut value = serde_json::to_value(ownership).unwrap();
+            value["replayed_children"] = serde_json::json!([child]);
+            let ownership = serde_json::from_value(value).unwrap();
+            let root = app.agents.get_mut(&AgentId(0)).unwrap();
+            root.history_page_request = Some(request_id);
+            let action = Action::TaskComplete(TaskResult::HistoryPageLoaded {
+                agent_id: AgentId(0),
+                session_id: session_id.clone(),
+                binding_epoch: root.session_binding_epoch,
+                request_id,
+                generation: root.history_generation,
+                query,
+                result: Ok(HistoryPageResponse {
+                    session_id: session_id.clone(),
+                    cut: "cut".into(),
+                    rows: vec![HistoryRow {
+                        source: HistorySourceKey { record, part: 0 },
+                        entity: None,
+                        fragment: None,
+                        update: SessionUpdate::Grow(Box::new(shell::extensions::notification::SessionNotification {
+                            session_id: session_id.clone(),
+                            update: test_subagent_spawned(root_sid, child),
+                            meta: None,
+                        })),
+                    }],
+                    range: None,
+                    older_cursor: (request_id == 1).then(|| "older".into()),
+                    newer_cursor: None,
+                    target_source: None,
+                    descendant_ownership: Some(ownership),
+                }),
+            });
+            effects.push(crate::app::root::dispatch::dispatch(action, &mut app));
+        }
+        apply_descendant_restore_effect(&mut app, effects.pop().unwrap());
+        apply_descendant_restore_effect(&mut app, effects.pop().unwrap());
+        let root = &app.agents[&AgentId(0)];
+        assert!(root.subagent_views.contains_key("page-a"));
+        assert!(root.subagent_views.contains_key("page-b"));
+    });
+}
+
+#[test]
+fn prelaunch_failure_keeps_terminal_without_offering_child_history() {
+    with_replay_disk_home(|home| {
+        let root_sid = "prelaunch-root";
+        let child_sid = "prelaunch-child";
+        write_subagent_spawn_timeline(home, root_sid, child_sid, "prepare worktree");
+        let mut spawns = shell::session::storage::load_descendant_ownership_at(root_sid, home)
+            .unwrap().unwrap().into_spawns();
+        spawns.get_mut(child_sid).unwrap().terminal = Some(chat_state::SubagentTerminalEvent {
+            subagent_id: child_sid.into(),
+            child_session_id: child_sid.into(),
+            outcome: chat_state::SubagentOutcome::Failed,
+            duration_ms: 5,
+            tool_calls: 0,
+            turns: 0,
+            tokens_used: 0,
+            error: Some("worktree unavailable".into()),
+            result_ref: None,
+            snapshot_ref: None,
+        });
+        let mut app = make_app_with_agent(root_sid);
+        start_replay(&mut app);
+        replay_spawn(&mut app, root_sid, child_sid, "prelaunch-spawn");
+        assert!(app.agents[&AgentId(0)].subagent_views.contains_key(child_sid));
+        crate::app::subagent::apply_descendant_replay_batch(
+            &mut app, AgentId(0), &[],
+            crate::app::subagent::DescendantReplayBatch {
+                root_spawns: spawns,
+                replayed_direct_children: std::collections::HashSet::from([child_sid.into()]),
+                nodes: Vec::new(),
+            },
+        );
+        let root = &app.agents[&AgentId(0)];
+        let info = &root.session.subagent_sessions[child_sid];
+        assert_eq!(info.status.as_deref(), Some("failed"));
+        assert!(info.history_unavailable);
+        assert!(!root.subagent_views.contains_key(child_sid));
+    });
+}
+
+#[test]
+fn nested_terminal_uses_root_ownership_even_when_parent_history_is_missing() {
+    with_replay_disk_home(|home| {
+        let root_sid = "nested-root";
+        let child_sid = "nested-parent";
+        let nested_sid = "nested-child";
+        write_subagent_spawn_timeline(home, root_sid, child_sid, "parent task");
+        let mut root_spawns = shell::session::storage::load_descendant_ownership_at(root_sid, home)
+            .unwrap()
+            .unwrap()
+            .into_spawns();
+        write_subagent_spawn_timeline(home, child_sid, nested_sid, "nested task");
+        root_spawns.extend(
+            shell::session::storage::load_descendant_ownership_at(child_sid, home)
+                .unwrap()
+                .unwrap()
+                .into_spawns(),
+        );
+        for (sid, outcome) in [
+            (child_sid, chat_state::SubagentOutcome::Failed),
+            (nested_sid, chat_state::SubagentOutcome::Completed),
+        ] {
+            root_spawns.get_mut(sid).unwrap().terminal = Some(chat_state::SubagentTerminalEvent {
+                subagent_id: sid.into(),
+                child_session_id: sid.into(),
+                outcome,
+                duration_ms: 100,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                result_ref: None,
+                snapshot_ref: None,
+                error: None,
+            });
+        }
+        let mut app = make_app_with_agent(root_sid);
+        crate::app::subagent::apply_descendant_replay_batch(
+            &mut app, AgentId(0), &[],
+            crate::app::subagent::DescendantReplayBatch {
+                root_spawns,
+                replayed_direct_children: std::collections::HashSet::from([
+                    child_sid.into(), nested_sid.into(),
+                ]),
+                nodes: vec![crate::app::subagent::DescendantReplayNode {
+                    parent_session_id: nested_sid.into(),
+                    durable_children: Default::default(),
+                    lifecycle: Vec::new(),
+                    plan: None,
+                }],
+            },
+        );
+        let root = &app.agents[&AgentId(0)];
+        assert!(!root.subagent_views.contains_key(child_sid));
+        assert!(root.subagent_views.contains_key(nested_sid));
+        assert_eq!(root.session.subagent_sessions[nested_sid].status.as_deref(), Some("completed"));
+        assert!(root.scrollback.is_empty());
     });
 }
 
@@ -404,6 +638,7 @@ fn resync_ownership_is_consumed_only_after_matching_generation_finishes() {
                         result: Ok(None),
                         descendant_ownership: Some(captured.clone()),
                         behavior: None,
+                        scheduler_snapshot: None,
                     },
                 ),
                 &mut app,
@@ -452,6 +687,7 @@ fn descendant_replay_is_offloaded_and_preserves_live_controls_and_cursor() {
             &mut app,
             AgentId(0),
             Some(ownership.clone()),
+            None,
         );
         assert_eq!(first.len(), 1);
         let first_request = match &first[0] {
@@ -476,6 +712,7 @@ fn descendant_replay_is_offloaded_and_preserves_live_controls_and_cursor() {
             &mut app,
             AgentId(0),
             Some(ownership),
+            None,
         );
         let (second_request, second_captures) = match &second[0] {
             crate::app::actions::Effect::RestoreDescendantState {
@@ -503,6 +740,7 @@ fn descendant_replay_is_offloaded_and_preserves_live_controls_and_cursor() {
                 parent_session_id: child_sid.into(),
                 durable_children: Default::default(),
                 lifecycle: vec![stale_control],
+                plan: None,
             }],
             ..Default::default()
         };
@@ -512,6 +750,7 @@ fn descendant_replay_is_offloaded_and_preserves_live_controls_and_cursor() {
             &acp::SessionId::new(root_sid),
             binding_epoch,
             first_request,
+            None,
             &[],
             crate::app::subagent::DescendantReplayBatch::default(),
         );
@@ -525,6 +764,7 @@ fn descendant_replay_is_offloaded_and_preserves_live_controls_and_cursor() {
             &acp::SessionId::new(root_sid),
             binding_epoch,
             second_request,
+            None,
             &second_captures,
             stale_batch,
         );
@@ -533,6 +773,53 @@ fn descendant_replay_is_offloaded_and_preserves_live_controls_and_cursor() {
         assert_eq!(root.subagent_views[child_sid].session.agent_name(), Some("reviewer"));
         assert!(root.session.replay_live_cursor_seen);
     });
+}
+
+#[test]
+fn reconnect_refreshes_plan_of_already_opened_child() {
+    use crate::app::actions::Effect;
+    use crate::app::subagent::{DescendantReplayBatch, DescendantReplayNode};
+
+    let root_sid = "plan-root";
+    let child_sid = "plan-child";
+    let mut app = make_app_with_agent(root_sid);
+    start_replay(&mut app);
+    replay_spawn(&mut app, root_sid, child_sid, "plan-spawn");
+    let root = app.agents.get_mut(&AgentId(0)).unwrap();
+    root.session.loading_replay = false;
+    root.session.subagent_sessions.get_mut(child_sid).unwrap().child_updates_replayed = true;
+    for live_plan in [false, true] {
+        let child = app.agents.get_mut(&AgentId(0)).unwrap().subagent_views.get_mut(child_sid).unwrap();
+        child.child_todo_plan_received_live = false;
+        let effects = crate::app::subagent::schedule_descendant_state_restore(&mut app, AgentId(0), None, None);
+        let [Effect::RestoreDescendantState { session_id, binding_epoch, request_id, child_control_captures, .. }] = effects.as_slice() else {
+            panic!("expected descendant restore");
+        };
+        if live_plan {
+            handle(plan_update_msg(child_sid, &[], Some("live-empty"), false), &mut app);
+        }
+        crate::app::subagent::apply_descendant_state_restore(
+            &mut app, AgentId(0), session_id, *binding_epoch, *request_id, None, child_control_captures,
+            DescendantReplayBatch {
+                nodes: vec![DescendantReplayNode {
+                    parent_session_id: child_sid.into(),
+                    durable_children: Default::default(),
+                    lifecycle: Vec::new(),
+                    plan: Some(acp::Plan::new(vec![acp::PlanEntry::new(
+                        "persisted while detached", acp::PlanEntryPriority::Medium, acp::PlanEntryStatus::Pending,
+                    )])),
+                }],
+                ..Default::default()
+            },
+        );
+        let todos = app.agents[&AgentId(0)].subagent_views[child_sid].todo.todos();
+        if live_plan {
+            assert!(todos.is_empty());
+        } else {
+            assert_eq!(todos[0].content, "persisted while detached");
+            assert_eq!(todos.len(), 1);
+        }
+    }
 }
 
 #[test]

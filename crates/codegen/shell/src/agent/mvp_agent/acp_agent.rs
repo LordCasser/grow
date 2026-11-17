@@ -1595,8 +1595,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             );
         }
         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
-        if let Some(persist) = persist_data {
-            response_meta_map.insert("grow/persist".to_string(), persist);
+        if let Some(persist) = &persist_data {
+            response_meta_map.insert("grow/persist".to_string(), persist.clone());
         }
         let session_cwd = self
             .sessions
@@ -1716,6 +1716,61 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         // recovery gate and load-owned await. History pages are not inputs.
         let behavior_snapshot = self.behavior_snapshot_from_actor(&session_id, &control_tx).await?;
         behavior_snapshot.insert_meta(&mut response_meta_map);
+        if session_exists && !no_replay {
+            self.publish_resident_workflow_state(
+                &session_id, &control_tx, persist_data.as_ref(), target_client_id.as_ref(),
+            ).await?;
+        }
+        if session_exists {
+            let scheduler_handle = {
+                self.sessions
+                    .borrow()
+                    .get(&session_id)
+                    .filter(|handle| handle.cmd_tx.same_channel(&control_tx))
+                    .and_then(|handle| handle.scheduler_handle.clone())
+            };
+            if let Some(scheduler_handle) = scheduler_handle {
+                let (reply, response) = tokio::sync::oneshot::channel();
+                if scheduler_handle
+                    .0
+                    .send(tools::implementations::grow_build::scheduler::types::SchedulerCommand::List {
+                        reply,
+                    })
+                    .is_ok()
+                {
+                    if let Ok(snapshot) = response.await {
+                        let generation = snapshot.generation();
+                        let revision = snapshot.revision();
+                        let tasks = snapshot
+                            .tasks
+                            .into_iter()
+                            .map(|task| {
+                                let next_fire_at = Some(task.next_fire_at().to_rfc3339());
+                                let human_schedule = tools::implementations::grow_build::scheduler::interval::interval_to_human(task.interval_secs);
+                                crate::extensions::notification::ScheduledTaskLoadSnapshot {
+                                    task_id: task.id,
+                                    prompt: task.prompt,
+                                    human_schedule,
+                                    next_fire_at,
+                                    last_subagent_id: task.last_subagent_id,
+                                }
+                            })
+                            .collect();
+                        response_meta_map.insert(
+                            crate::extensions::notification::SCHEDULER_LOAD_SNAPSHOT_META_KEY.into(),
+                            serde_json::to_value(crate::extensions::notification::SchedulerLoadSnapshot {
+                                generation,
+                                revision,
+                                tasks,
+                            })
+                            .map_err(|error| acp::Error::internal_error().data(format!(
+                                "Could not serialize resident scheduler snapshot: {error}"
+                            )))?,
+                        );
+                    }
+                }
+            }
+        }
         let config_options = self.session_config_options(Some(&session_id), &model_state);
         let response = acp::LoadSessionResponse::new()
             .config_options(config_options)
@@ -1727,6 +1782,17 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             let cursor_tail = cursor.is_some() && !spawn_new_actor;
             self.apply_loaded_history_cut(&session_id, history_page_cut, cursor_tail)
                 .await;
+        }
+        if self
+            .sessions
+            .borrow()
+            .get(&session_id)
+            .is_none_or(|handle| {
+                handle.cmd_tx.is_closed() || !handle.cmd_tx.same_channel(&control_tx)
+            })
+        {
+            return Err(acp::Error::internal_error()
+                .data("Session actor changed or ended while loading; retry the session load."));
         }
         drop(catalog_transaction);
         if let Some(token) = recovery_token.take() {

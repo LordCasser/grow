@@ -1,5 +1,41 @@
 use super::*;
 
+fn scheduler_event_version(meta: Option<&serde_json::Value>) -> Option<(String, u64)> {
+    let meta = meta?;
+    Some((
+        meta.get("grow/schedulerGeneration")?.as_str()?.to_owned(),
+        meta.get("grow/schedulerRevision")?.as_u64()?,
+    ))
+}
+
+fn admit_scheduler_event(
+    session: &mut super::super::session::AgentSession,
+    task_id: &str,
+    version: Option<(String, u64)>,
+    present: bool,
+) -> bool {
+    match version {
+        Some((generation, revision)) => {
+            session.note_scheduler_task_version(task_id, generation, revision, present)
+        }
+        None => session.scheduler_generation.is_none(),
+    }
+}
+
+pub(crate) fn apply_scheduler_load_snapshot(
+    app: &mut AppView,
+    session_id: &acp::SessionId,
+    snapshot: shell::extensions::notification::SchedulerLoadSnapshot,
+) {
+    let Some(matched) = find_session_match(app, session_id) else {
+        return;
+    };
+    let agent_id = matched.agent_id();
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        agent.session.apply_scheduler_snapshot(snapshot);
+    }
+}
+
 /// Route a `ToolCallUpdate` stdout chunk to the central bg task store.
 ///
 /// Returns `true` if the update was consumed (belongs to a bg task),
@@ -424,6 +460,7 @@ pub(super) fn handle_scheduled_task_created(
     let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
         return false;
     };
+    let scheduler_version = scheduler_event_version(session_notif.meta.as_ref());
     let (task_id, prompt, human_schedule, next_fire_at) = match session_notif.update {
         GrowSessionUpdate::ScheduledTaskCreated {
             task_id,
@@ -443,6 +480,9 @@ pub(super) fn handle_scheduled_task_created(
         .agents
         .get_mut(&agent_id)
         .expect("find_session_match returned an existing AgentId");
+    if !admit_scheduler_event(&mut agent.session, &task_id, scheduler_version, true) {
+        return false;
+    }
 
     // Remove provisional entries (created by /loop for instant UI feedback).
     agent
@@ -477,6 +517,7 @@ pub(super) fn handle_scheduled_task_fired(notif: &acp::ExtNotification, app: &mu
     let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
         return false;
     };
+    let scheduler_version = scheduler_event_version(session_notif.meta.as_ref());
     let (task_id, prompt, human_schedule, next_fire_at, subagent_id) = match session_notif.update {
         GrowSessionUpdate::ScheduledTaskFired {
             task_id,
@@ -497,6 +538,10 @@ pub(super) fn handle_scheduled_task_fired(notif: &acp::ExtNotification, app: &mu
         .agents
         .get_mut(&agent_id)
         .expect("find_session_match returned an existing AgentId");
+    let present = next_fire_at.is_some() || agent.session.scheduled_tasks.contains_key(&task_id);
+    if !admit_scheduler_event(&mut agent.session, &task_id, scheduler_version, present) {
+        return false;
+    }
 
     // Self-heal: if the task is unknown (e.g. a regression of the shell-side
     // re-announce on session restore), insert a fresh entry from the fire
@@ -533,6 +578,7 @@ pub(super) fn handle_scheduled_task_deleted(
     let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
         return false;
     };
+    let scheduler_version = scheduler_event_version(session_notif.meta.as_ref());
     let task_id = match session_notif.update {
         GrowSessionUpdate::ScheduledTaskDeleted { task_id } => task_id,
         _ => return false,
@@ -547,6 +593,9 @@ pub(super) fn handle_scheduled_task_deleted(
         .agents
         .get_mut(&agent_id)
         .expect("find_session_match returned an existing AgentId");
+    if !admit_scheduler_event(&mut agent.session, &task_id, scheduler_version, false) {
+        return false;
+    }
 
     agent.session.scheduled_tasks.remove(&task_id);
     is_active

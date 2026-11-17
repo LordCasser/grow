@@ -351,6 +351,13 @@ pub struct ScheduledTaskInfo {
     pub tag: String,
     pub last_subagent_id: Option<String>,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct SchedulerTaskVersion {
+    generation: String,
+    revision: u64,
+    present: bool,
+}
 /// Parsed status of the session's long-lived Goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDisplayStatus {
@@ -1093,6 +1100,10 @@ pub struct AgentSession {
     pub bg_tool_call_to_task: HashMap<String, String>,
     /// Active scheduled tasks, keyed by task_id.
     pub scheduled_tasks: HashMap<String, ScheduledTaskInfo>,
+    /// Current scheduler epoch and last complete snapshot's revision floor.
+    pub(crate) scheduler_generation: Option<String>,
+    pub(crate) scheduler_snapshot_revision: Option<u64>,
+    pub(crate) scheduler_task_versions: HashMap<String, SchedulerTaskVersion>,
     /// Plain-text prompt currently in flight, captured at send time and
     /// cleared as soon as the server emits any activity (chunk, tool call,
     /// retry, etc.). Used by `do_cancel_turn` to "rewind" a prompt back to
@@ -1302,6 +1313,194 @@ pub struct ChipElement {
 /// Names of Shell-owned Workflow runtime commands used as capability signals.
 const WORKFLOW_RUN_COMMAND_NAME: &str = "workflow-run";
 impl AgentSession {
+    fn compare_scheduler_generations(left: &str, right: &str) -> std::cmp::Ordering {
+        if left == right {
+            return std::cmp::Ordering::Equal;
+        }
+        match (uuid::Uuid::parse_str(left), uuid::Uuid::parse_str(right)) {
+            (Ok(left), Ok(right)) => left.cmp(&right),
+            _ => left.cmp(right),
+        }
+    }
+
+    fn compare_scheduler_versions(
+        left_generation: &str,
+        left_revision: u64,
+        right_generation: &str,
+        right_revision: u64,
+    ) -> std::cmp::Ordering {
+        if left_generation == right_generation {
+            return left_revision.cmp(&right_revision);
+        }
+        Self::compare_scheduler_generations(left_generation, right_generation)
+    }
+
+    fn accepts_scheduler_version(&self, generation: &str, revision: u64) -> bool {
+        let Some(current_generation) = self.scheduler_generation.as_deref() else {
+            return true;
+        };
+        match Self::compare_scheduler_generations(generation, current_generation) {
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => self
+                .scheduler_snapshot_revision
+                .is_none_or(|snapshot_floor| revision >= snapshot_floor),
+        }
+    }
+
+    fn admit_scheduler_snapshot_version(&mut self, generation: String, revision: u64) -> bool {
+        match self.scheduler_generation.as_deref() {
+            None => {
+                self.scheduler_generation = Some(generation);
+                self.scheduler_snapshot_revision = Some(revision);
+                true
+            }
+            Some(current_generation) => {
+                match Self::compare_scheduler_generations(&generation, current_generation) {
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => {
+                        if self
+                            .scheduler_snapshot_revision
+                            .is_some_and(|floor| revision < floor)
+                        {
+                            return false;
+                        }
+                        self.scheduler_snapshot_revision = Some(revision);
+                        true
+                    }
+                    std::cmp::Ordering::Greater => {
+                        self.scheduler_generation = Some(generation);
+                        self.scheduler_snapshot_revision = Some(revision);
+                        true
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn note_scheduler_task_version(
+        &mut self,
+        task_id: &str,
+        generation: String,
+        revision: u64,
+        present: bool,
+    ) -> bool {
+        if !self.accepts_scheduler_version(&generation, revision) {
+            return false;
+        }
+        if let Some(current) = self.scheduler_task_versions.get(task_id)
+            && Self::compare_scheduler_versions(
+                &generation,
+                revision,
+                &current.generation,
+                current.revision,
+            ) == std::cmp::Ordering::Less
+        {
+            return false;
+        }
+        self.scheduler_task_versions.insert(
+            task_id.to_owned(),
+            SchedulerTaskVersion {
+                generation: generation.clone(),
+                revision,
+                present,
+            },
+        );
+        if self.scheduler_generation.as_deref().is_none_or(|current| {
+            Self::compare_scheduler_generations(&generation, current) == std::cmp::Ordering::Greater
+        }) {
+            self.scheduler_generation = Some(generation);
+            self.scheduler_snapshot_revision = None;
+        }
+        true
+    }
+
+    pub(crate) fn apply_scheduler_snapshot(
+        &mut self,
+        snapshot: shell::extensions::notification::SchedulerLoadSnapshot,
+    ) {
+        if !self.admit_scheduler_snapshot_version(snapshot.generation.clone(), snapshot.revision) {
+            return;
+        }
+        let snapshot_tasks: HashSet<_> = snapshot
+            .tasks
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect();
+        let existing_ids: Vec<_> = self.scheduled_tasks.keys().cloned().collect();
+        for task_id in existing_ids {
+            let newer = self
+                .scheduler_task_versions
+                .get(&task_id)
+                .is_some_and(|version| {
+                    Self::compare_scheduler_versions(
+                        &version.generation,
+                        version.revision,
+                        &snapshot.generation,
+                        snapshot.revision,
+                    ) == std::cmp::Ordering::Greater
+                });
+            if !snapshot_tasks.contains(&task_id) && !newer {
+                self.scheduled_tasks.remove(&task_id);
+                self.scheduler_task_versions.insert(
+                    task_id,
+                    SchedulerTaskVersion {
+                        generation: snapshot.generation.clone(),
+                        revision: snapshot.revision,
+                        present: false,
+                    },
+                );
+            } else if !snapshot_tasks.contains(&task_id)
+                && self
+                    .scheduler_task_versions
+                    .get(&task_id)
+                    .is_some_and(|version| !version.present)
+            {
+                self.scheduled_tasks.remove(&task_id);
+            }
+        }
+        for task in snapshot.tasks {
+            let newer = self
+                .scheduler_task_versions
+                .get(&task.task_id)
+                .filter(|version| {
+                    Self::compare_scheduler_versions(
+                        &version.generation,
+                        version.revision,
+                        &snapshot.generation,
+                        snapshot.revision,
+                    ) == std::cmp::Ordering::Greater
+                });
+            if let Some(version) = newer {
+                if !version.present {
+                    self.scheduled_tasks.remove(&task.task_id);
+                }
+                continue;
+            }
+            let task_id = task.task_id;
+            self.scheduled_tasks.insert(
+                task_id.clone(),
+                ScheduledTaskInfo {
+                    task_id: task_id.clone(),
+                    prompt: task.prompt,
+                    human_schedule: task.human_schedule,
+                    created_at: Instant::now(),
+                    next_fire_at: task.next_fire_at,
+                    tag: "loop".into(),
+                    last_subagent_id: task.last_subagent_id,
+                },
+            );
+            self.scheduler_task_versions.insert(
+                task_id,
+                SchedulerTaskVersion {
+                    generation: snapshot.generation.clone(),
+                    revision: snapshot.revision,
+                    present: true,
+                },
+            );
+        }
+    }
+
     /// Construct a session with the state shared by every lifecycle entry point.
     ///
     /// Lifecycle-specific facts (fork ancestry, replay, worktree membership,
@@ -1376,6 +1575,9 @@ impl AgentSession {
             bg_tasks: BTreeMap::new(),
             bg_tool_call_to_task: HashMap::new(),
             scheduled_tasks: HashMap::new(),
+            scheduler_generation: None,
+            scheduler_snapshot_revision: None,
+            scheduler_task_versions: HashMap::new(),
             in_flight_prompt: None,
             compact_held_prompt: None,
             current_prompt_id: None,

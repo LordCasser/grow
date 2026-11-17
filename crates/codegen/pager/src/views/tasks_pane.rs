@@ -1793,7 +1793,8 @@ impl TasksPane {
         } else {
             model_text.width() as u16 + 1
         };
-        let overlay_w = kill_w + 3 + right_text_w + model_w + badge_w + 1;
+        let view_w = if info.history_unavailable { 0 } else { 3 };
+        let overlay_w = kill_w + view_w + right_text_w + model_w + badge_w + 1;
         clear_overlay_area(buf, area, y, overlay_w);
 
         let mut rx = area.x + area.width;
@@ -1822,27 +1823,28 @@ impl TasksPane {
             ));
         }
 
-        // View button
-        rx = rx.saturating_sub(3);
-        let is_view_hovered = matches!(
-            &self.hovered_view,
-            Some(TaskEntryId::Agent(sid)) if sid == subagent_id
-        );
-        let view_style = if is_view_hovered {
-            Style::default().fg(theme.text_primary)
-        } else {
-            Style::default().fg(theme.gray)
-        };
-        buf.set_span(
-            rx,
-            y,
-            &Span::styled(crate::glyphs::enlarge_button(), view_style),
-            3,
-        );
-        self.view_button_rects.push((
-            TaskEntryId::Agent(subagent_id.to_string()),
-            Rect::new(rx, y, 3, 1),
-        ));
+        if view_w > 0 {
+            rx = rx.saturating_sub(view_w);
+            let is_view_hovered = matches!(
+                &self.hovered_view,
+                Some(TaskEntryId::Agent(sid)) if sid == subagent_id
+            );
+            let view_style = if is_view_hovered {
+                Style::default().fg(theme.text_primary)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span(
+                rx,
+                y,
+                &Span::styled(crate::glyphs::enlarge_button(), view_style),
+                view_w,
+            );
+            self.view_button_rects.push((
+                TaskEntryId::Agent(subagent_id.to_string()),
+                Rect::new(rx, y, view_w, 1),
+            ));
+        }
 
         // Time/status text
         let right_width = right_text.width() as u16;
@@ -2000,6 +2002,7 @@ mod tests {
             child_cwd: None,
             worktree_path: None,
             child_updates_replayed: false,
+            history_unavailable: false,
         }
     }
 

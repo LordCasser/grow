@@ -117,6 +117,8 @@ pub(super) struct HistoryPageCut {
     records: u64,
     branch: Option<chat_state::EventSeq>,
     source: CutSource,
+    ownership: Arc<crate::session::storage::DescendantOwnership>,
+    indexed: Option<crate::session::storage::jsonl::IndexedHistory>,
 }
 
 pub(super) struct CapturedHistoryCut {
@@ -157,6 +159,10 @@ impl HistoryPageCut {
                 records: history.record_count(),
                 branch: timeline.history_branch(),
                 source,
+                ownership: Arc::new(crate::session::storage::DescendantOwnership::from_validated(
+                    session.0.as_ref(), timeline, history,
+                )),
+                indexed: history.indexed.clone(),
             },
         })
     }
@@ -404,8 +410,9 @@ impl HistoryPageCut {
         &self,
         session_id: acp::SessionId,
         window: crate::session::history::PageWindow,
-    ) -> HistoryPageResponse {
-        HistoryPageResponse {
+    ) -> io::Result<HistoryPageResponse> {
+        let descendant_ownership = self.ownership.for_page(&window.rows, self.indexed.as_ref())?;
+        Ok(HistoryPageResponse {
             session_id,
             cut: self.token(),
             rows: window.rows,
@@ -417,7 +424,8 @@ impl HistoryPageCut {
                 .newer_position
                 .map(|position| self.cursor(CursorRole::After, position)),
             target_source: window.target_source,
-        }
+            descendant_ownership,
+        })
     }
 }
 
@@ -652,12 +660,12 @@ impl MvpAgent {
         let session = request.session_id.clone();
         let branch = cut.branch;
         let read_cut = cut.clone();
-        let window = self
+        let response = self
             .authorized_read(&request.session_id, &request.cut, branch, move || {
-                read_cut.read(&session, query)
+                let window = read_cut.read(&session, query)?;
+                read_cut.response(session, window)
             })
             .await?;
-        let response = cut.response(request.session_id, window);
         timer.with_field("rows", response.rows.len());
         crate::extensions::to_raw_response(&response)
     }

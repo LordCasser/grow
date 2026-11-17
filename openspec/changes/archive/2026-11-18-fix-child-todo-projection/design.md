@@ -1,0 +1,5 @@
+# Design
+
+Child Plan updates have the same source and conversion as root Plan updates. The routing layer must update `AgentView.todo` directly because `AgentSession::handle_update` handles transcript/tracker effects and does not own the Todo pane. Deferred replay must do this while streaming updates, without materializing the transcript. If a live Plan has already arrived, a small per-view marker prevents older persisted Plan entries from overwriting it; this also preserves a live empty Plan without reading history at startup. Reconnect recursively clears that marker, allowing persisted child Plans to refresh a same-session view while retaining precedence for any new live Plan that arrives during reconnect. Root routing stays untouched.
+
+For an already opened child, the root reconnect uses the latest committed Plan from the validated child Timeline already read by the descendant worker. Apply it to the captured child binding when there is no Plan from the new live connection. History-page workers do not refresh this current state.

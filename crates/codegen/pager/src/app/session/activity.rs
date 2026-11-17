@@ -246,6 +246,7 @@ mod tests {
             child_cwd: None,
             worktree_path: None,
             child_updates_replayed: false,
+            history_unavailable: false,
         }
     }
 

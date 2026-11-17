@@ -625,6 +625,7 @@ mod tests {
             older_cursor: older.map(str::to_string),
             newer_cursor: newer.map(str::to_string),
             target_source: target,
+            descendant_ownership: None,
         }
     }
 

@@ -1,0 +1,3 @@
+- [x] Resolve child and ancestor ownership at the actual page cut and verify index and load metadata budget boundaries.
+- [x] Apply canonical state across descendants and verify missing child and early terminal cases.
+- [x] Validate normal child routes, stale page adoption and unchanged history ordering.

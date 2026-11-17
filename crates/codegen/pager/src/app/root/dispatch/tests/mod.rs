@@ -282,6 +282,7 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         child_cwd: None,
         worktree_path: None,
         child_updates_replayed: false,
+        history_unavailable: false,
     }
 }
 fn cta_entry(name: &str, status: &str) -> extension_types::MarketplacePluginEntry {
