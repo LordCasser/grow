@@ -95,11 +95,31 @@ pub(super) async fn arbitrate_idle_wake(
     }
     SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
     if session.state.lock().await.foreground.is_idle() {
-        session.schedule_goal_on_idle(completion_tx);
+        session.schedule_goal_on_idle(completion_tx).await;
     }
 }
 
 impl SessionActor {
+    /// Shared eligibility for an autonomous primary turn. Foreground
+    /// availability alone does not establish that an exhausted context can
+    /// sample again. Call under admission so a control cannot change the
+    /// route between the decision and the claim.
+    pub(super) async fn can_start_idle_model_turn(&self, state: &AdmissionState) -> bool {
+        let output_cap = self
+            .tool_context
+            .task_output_token_budget
+            .as_ref()
+            .and_then(|budget| budget.clamp_request(None));
+        state.execution_open()
+            && state.foreground.is_idle()
+            && state.pending_manual_compact.is_none()
+            && state.pending_step_controls.is_empty()
+            && self
+                .chat_state_handle
+                .allows_autonomous_context(output_cap)
+                .await
+    }
+
     /// `CompactSession` admission on the mailbox: decide the immediate
     /// status and either queue a pending compact behind the running turn or
     /// spawn the foreground compaction. Extracted from the command arm so
@@ -315,6 +335,84 @@ mod idle_admission_tests {
     }
 
     #[tokio::test]
+    async fn exhausted_context_parks_an_active_goal_without_an_idle_retry() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_runtime_available
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-over-window".into(),
+                        "finish the migration after recovery".into(),
+                        None,
+                        "2026-11-18T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+
+                use chat_state::{TimelineEventKind, TurnEvent, TurnId, TurnTerminal};
+                let window = actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .unwrap()
+                    .context_window;
+                let turn = TurnId(1);
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(TimelineEventKind::Turn(TurnEvent::Started {
+                        id: turn,
+                        prompt_id: "failed-user-turn".into(),
+                        input_ids: Vec::new(),
+                        identity: crate::session::PromptOrigin::User
+                            .turn_identity(crate::session::TurnKind::Internal),
+                        model_id: "test-model".into(),
+                        input_message_count: 0,
+                        prompt_index: 0,
+                        prompt_text: String::new(),
+                        input_kind: chat_state::TurnInputKind::Prompt,
+                        redirect_kind: None,
+                    }))
+                    .await
+                    .unwrap();
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(TimelineEventKind::Turn(TurnEvent::Ended {
+                        id: turn,
+                        outcome: "error".into(),
+                        duration_ms: 1,
+                        tool_count: 0,
+                        terminal: TurnTerminal {
+                            source: chat_state::TurnTerminalSource::Host,
+                            completion_kind: TurnTerminal::CONTEXT_WINDOW_EXCEEDED.into(),
+                            stop_reason: "error".into(),
+                        },
+                        cancellation_category: None,
+                        details: Some(serde_json::json!({ "context_window": window.get() })),
+                    }))
+                    .await
+                    .unwrap();
+                let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+                arbitrate_idle_wake(actor.clone(), completion_tx).await;
+                assert!(!actor.goal_drive.is_running());
+                assert!(actor.state.lock().await.foreground.is_idle());
+                assert_eq!(
+                    actor.goal_tracker.lock().status(),
+                    Some(crate::session::goal_tracker::GoalStatus::Active)
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn active_goal_continues_after_manual_compaction_releases_the_foreground() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -385,7 +483,7 @@ mod idle_admission_tests {
                     .select_behavior(tool_types::BehaviorId::Goal);
                 let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
 
-                actor.schedule_goal_on_idle(completion_tx);
+                actor.schedule_goal_on_idle(completion_tx).await;
                 actor.state.lock().await.pending_inputs.push_back(
                     crate::session::actor::tests::support::user_item("user-wins", "test-client"),
                 );

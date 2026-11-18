@@ -1509,6 +1509,21 @@ impl ChatStateActor {
             ChatStateCommand::GetProjectedTokens { reply } => {
                 let _ = reply.send(self.state.projected_tokens);
             }
+            ChatStateCommand::AllowsAutonomousContext { output_cap, reply } => {
+                let config = &self.state.sampling_config;
+                let output_reserve = output_cap
+                    .map(|cap| config.output_limit.unwrap_or(cap).min(cap))
+                    .or(config.output_limit);
+                let projected_request = self
+                    .state
+                    .projected_tokens
+                    .saturating_add(u64::from(output_reserve.unwrap_or(0)));
+                let _ = reply.send(
+                    self.state
+                        .timeline
+                        .allows_autonomous_context(config.context_window.get(), projected_request),
+                );
+            }
             ChatStateCommand::GetLastTurnUsage { reply } => {
                 let _ = reply.send(self.state.last_turn_usage.clone());
             }

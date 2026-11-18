@@ -279,6 +279,10 @@ pub struct TurnTerminal {
     pub completion_kind: String,
 }
 
+impl TurnTerminal {
+    pub const CONTEXT_WINDOW_EXCEEDED: &str = "context_window_exceeded";
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnTerminalSource {
@@ -2329,6 +2333,48 @@ pub struct Timeline {
     surface_checkpoint_cut: Option<EventSeq>,
     seed_open_at_checkpoint: bool,
     published_skills: SurfaceSkillSources,
+    context_window_failure: Option<ContextWindowFailure>,
+}
+
+/// The last exhausted primary window, and whether the retained context has
+/// since been durably replaced. Appending receipts and input is not recovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextWindowFailure {
+    window: u64,
+    history_replaced: bool,
+}
+
+impl ContextWindowFailure {
+    fn observe(current: &mut Option<Self>, event: &TimelineEvent) {
+        match &event.kind {
+            TimelineEventKind::Turn(TurnEvent::Ended {
+                terminal,
+                details: Some(details),
+                ..
+            }) if terminal.completion_kind == TurnTerminal::CONTEXT_WINDOW_EXCEEDED => {
+                *current = details["context_window"].as_u64().map(|window| Self {
+                    window,
+                    history_replaced: false,
+                });
+            }
+            TimelineEventKind::Turn(TurnEvent::Ended { terminal, .. })
+                if matches!(terminal.source, TurnTerminalSource::Provider { .. }) =>
+            {
+                *current = None;
+            }
+            TimelineEventKind::Messages(message)
+                if matches!(
+                    message.cause,
+                    MessageCause::Compaction | MessageCause::Rewind | MessageCause::ContextRebuild
+                ) =>
+            {
+                if let Some(failure) = current {
+                    failure.history_replaced = true;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The model-facing portion of a validated published cut. Body data for
@@ -2343,6 +2389,8 @@ pub struct SurfaceCheckpoint {
     context_rebuild: Option<EventSeq>,
     rewind: Option<EventSeq>,
     skills: SurfaceSkillSources,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window_failure: Option<ContextWindowFailure>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2502,6 +2550,8 @@ impl SurfaceCheckpoint {
         self.accept_projected_image_surface(projected);
         self.rewind = projected.last_rewind_seq;
         self.skills = projected.branch_skill_sources();
+        self.context_window_failure
+            .clone_from(&projected.context_window_failure);
     }
 
     pub fn accept(
@@ -2580,6 +2630,7 @@ impl SurfaceCheckpoint {
         for (id, item) in self.controls.accept(event, turn_active, step_active) {
             self.append(id, item);
         }
+        ContextWindowFailure::observe(&mut self.context_window_failure, event);
         Ok(())
     }
 
@@ -3007,6 +3058,7 @@ impl Timeline {
             timeline.published_skills = surface.skills;
             timeline.last_context_rebuild_seq = surface.context_rebuild;
             timeline.last_rewind_seq = surface.rewind;
+            timeline.context_window_failure = surface.context_window_failure;
         }
         for event in events {
             if event.seq.get() < timeline.next_seq || event.seq >= next_seq {
@@ -3869,6 +3921,12 @@ impl Timeline {
 
     pub fn last_request_at_ms(&self) -> Option<i64> {
         self.last_request.map(|(_, at_ms)| at_ms)
+    }
+
+    pub(crate) fn allows_autonomous_context(&self, window: u64, projected_request: u64) -> bool {
+        self.context_window_failure.as_ref().is_none_or(|failure| {
+            (window > failure.window || failure.history_replaced) && projected_request <= window
+        })
     }
 
     pub fn restore_hook_checkpoint(&mut self, session_id: Option<String>, generation: u64) {
@@ -5532,6 +5590,9 @@ impl Timeline {
         let surface_is_published = self
             .surface_checkpoint_cut
             .is_some_and(|cut| event.seq < cut);
+        if !surface_is_published {
+            ContextWindowFailure::observe(&mut self.context_window_failure, &event);
+        }
         if matches!(&event.kind, TimelineEventKind::Request(_)) {
             self.last_request = Some((event.seq, event.at_ms));
         }
@@ -11335,6 +11396,75 @@ mod tests {
             }))
             .unwrap();
         turn
+    }
+
+    #[test]
+    fn context_window_failure_survives_journal_replay_and_a_published_cut() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        record_prompt(&mut timeline, 1, 0, "retained prompt");
+        let id = start_internal_turn(&mut timeline, 2);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id,
+                outcome: "error".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: TurnTerminal {
+                    source: TurnTerminalSource::Host,
+                    stop_reason: "error".into(),
+                    completion_kind: TurnTerminal::CONTEXT_WINDOW_EXCEEDED.into(),
+                },
+                cancellation_category: None,
+                details: Some(serde_json::json!({ "context_window": 100_000 })),
+            }))
+            .unwrap();
+        let replay = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        let mut cut = SurfaceCheckpoint::default();
+        for event in timeline.events() {
+            cut.accept(event, false, false).unwrap();
+        }
+        let serialized_cut = serde_json::to_vec(&cut).unwrap();
+        let restored = Timeline::from_working_prefix(
+            Vec::new(),
+            timeline.next_seq(),
+            None,
+            None,
+            None,
+            false,
+            Some(serde_json::from_slice(&serialized_cut).unwrap()),
+        )
+        .unwrap();
+        for timeline in [&timeline, &replay, &restored] {
+            // A local estimate below the failed window cannot invalidate
+            // a provider rejection against the same window.
+            assert!(!timeline.allows_autonomous_context(100_000, 20_000));
+            assert!(!timeline.allows_autonomous_context(200_000, 200_001));
+            assert!(timeline.allows_autonomous_context(200_000, 200_000));
+        }
+
+        let id = start_internal_turn(&mut timeline, 3);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id,
+                outcome: "error".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: TurnTerminal {
+                    source: TurnTerminalSource::Host,
+                    stop_reason: "error".into(),
+                    completion_kind: "error".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        assert!(!timeline.allows_autonomous_context(100_000, 20_000));
+        let retained = timeline.rewind_surface(0).unwrap();
+        timeline
+            .replace_all(retained, MessageCause::Rewind)
+            .unwrap();
+        assert!(!timeline.allows_autonomous_context(100_000, 100_001));
+        assert!(timeline.allows_autonomous_context(100_000, 100_000));
     }
 
     fn start_tool(timeline: &mut Timeline, turn: TurnId, call_id: &str) -> StepId {

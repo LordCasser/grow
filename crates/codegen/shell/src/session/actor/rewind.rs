@@ -392,6 +392,9 @@ impl SessionActor {
             .await;
         self.clear_rewind_transaction().await?;
         self.signals_handle().mark_reverted();
+        if wants_conversation_rewind {
+            self.idle_arbiter.notify_one();
+        }
 
         Ok(RewindResponse {
             success: true,

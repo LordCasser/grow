@@ -372,6 +372,18 @@ pub(crate) struct AutoCompactTriggerInfo {
     pub max_output_tokens: Option<u32>,
 }
 
+impl AutoCompactTriggerInfo {
+    fn recovering_overflow(&self) -> bool {
+        matches!(
+            self.source,
+            "context_window_exceeded" | "sampler_error_recovery"
+        ) || self
+            .tokens_used
+            .saturating_add(u64::from(self.max_output_tokens.unwrap_or(0)))
+            > self.context_window
+    }
+}
+
 fn auto_compact_trigger(
     projected_tokens: u64,
     context_window: std::num::NonZeroU64,
@@ -3232,7 +3244,7 @@ impl SessionActor {
                 self.ensure_model_context_fits(trigger_info.max_output_tokens)
                     .await
             }
-            Err(e) => {
+            Err(mut e) => {
                 let span = tracing::Span::current();
                 span.record("success", false);
                 span.record("error", e.to_string().as_str());
@@ -3269,6 +3281,21 @@ impl SessionActor {
                     cancelled,
                 )
                 .await;
+                if !cancelled
+                    && trigger_info.recovering_overflow()
+                    && !crate::session::commands::is_fatal_turn_boundary_error(&e)
+                    && !Self::is_auth_compact_error(&e)
+                {
+                    // Preserve the summary failure (for example, no eligible
+                    // range) while carrying the primary request's capacity
+                    // evidence to the durable Turn terminal.
+                    let mut data = match e.data.take() {
+                        Some(value @ serde_json::Value::Object(_)) => value,
+                        other => serde_json::json!({ "message": other }),
+                    };
+                    data["context_recovery_required"] = serde_json::Value::Bool(true);
+                    e.data = Some(data);
+                }
                 Err(e)
             }
         }

@@ -257,7 +257,7 @@ Responses 路由若在显式 `in_progress` 的 function_call added 项省略初�
 
 Responses terminal 的 usage 明细缺失时，Sampler 只向解码副本的对象中插入默认成员，并保留原 JSON 的其余字节。排查重复 `response.id`、函数名或 usage 字段时，明细缺失不应让 SDK 的拒收消失；完整序列形式若 SDK 本来可直接解码，仍走原路径。原始 evidence 和未报告/明确 0 的可用性区分保留。见 [usage 补全契约](../openspec/specs/model-sampling/spec.md#requirement-responses-terminal-usage-completion-preserves-original-field-conflicts)。
 
-`response.content_part.added` 的 `output_text` part 若显式文本为空且完全缺少 annotations，Sampler 同样只在解码副本补 `[]`。已有 annotations 保留原值；null、错类型、非空初始文本缺字段、重复已知字段，以及 done/terminal 缺字段仍失败。原始 SSE evidence 逐字节保留，EOF 仍不能完成响应。该修复属于2.6.1之后的版本，见 [初始文本 part 契约](../openspec/specs/model-sampling/spec.md#requirement-initial-responses-empty-text-parts-may-omit-empty-annotations)。
+Responses 流的 `output_text` 在文本 part 结束、assistant message 结束或终态快照中省略 `annotations` 时，Sampler 在解码副本中补 `[]`。`response.content_part.added` 仍仅对显式空文本补全。已有字段、其余原始 JSON 字节和类型检查均保留。终态同时缺 usage 明细时，两类补全可以一起应用。排查 `missing field annotations` 时，按事件类型核对原始 SSE evidence，流仍须收到有效终态才会完成。见 [文本注解契约](../openspec/specs/model-sampling/spec.md#requirement-responses-text-snapshots-may-omit-empty-annotations)。
 
 若 `response.failed` 只携带 `response.error/object/status` 而缺完整快照，SDK 可先报 missing created_at。Sampler 仅对已验证的精确稀疏字段形状保留原 code/message，沿既有服务错误分类及有限恢复门处理，并记录实际 failed 终态；不补时间戳、response ID、usage 或完成输出。额外字段、重复键或畸形值不采用此例外，完整失败仍走原 typed 路径。2.6.1之后的修复与证据见 [稀疏失败契约](../openspec/specs/model-sampling/spec.md#requirement-sparse-responses-failure-envelopes-preserve-provider-errors)。
 
@@ -373,6 +373,8 @@ Workflow 的 live discovery 单元测试在运行时复用 `TestSandbox` 和 `Te
 主 Agent 与普通子 Agent 共用 SessionActor 的压缩链路和配置解析。阈值按各自实际
 模型解析，Workflow 子 Agent 的阈值来自其冻结路由。对照排查时，检查各自的有效请求、
 已选模型和 Timeline 中的压缩事务。见 [请求压力契约](../openspec/specs/context-compaction/spec.md#requirement-compaction-completion-and-admission-use-effective-context-pressure)。
+
+上下文超窗的 Turn 在 Timeline 终态记录失败窗口。通知和 Goal 共用空闲准入，冷加载也从同一事实恢复待处理状态。控制提交并激活更大窗口后，或压缩、rewind、重建提交后，再按当前有效输入和已知输出预留判断能否接续。真实用户重试和手动压缩仍走各自原有入口。见 [后台接续的容量恢复契约](../openspec/specs/context-compaction/spec.md#requirement-autonomous-model-turns-wait-for-context-recovery)。
 
 Grow 原生 `set_subagent_model` 通过 session-bound SubagentBackend 注入调用者身份，coordinator
 只向仍在运行的直属 child 转发 exact runtime；lifecycle root 的只读可见性不授予孙代控制权。
@@ -872,6 +874,8 @@ Resume 的首历史归因沿用 opt-in instrumentation：`session.replay.first_s
 请求的活动 Goal 投影作用域由 ChatState 请求状态持有，独立于图片选择缓存；冷恢复从持久化授权初始化，运行期随同一 Control durable ACK 切换。pause、完成、budget stop、clear 和 Behavior 切换移除授权，restart 与定义 revision 使用新的 tag；失败写入不发布新 scope。主请求沿既有 Step control gate 串行化 scope 读取、图片资格查询和请求投影，避免旧 tag 越过较新的 Control。换路由仍清 provider 校准，图片缓存失效保留现有校准语义。见 [有效请求计数契约](../openspec/specs/model-sampling/spec.md#requirement-context-mutations-use-effective-request-estimates)。
 
 完整可信的 provider context 回执即使低于本地 heuristic 也成为计数锚点。校准只保留一份随当前投影推进的参考：追加按本地增量计入；低值 footprint 缩小时按当前比例向上取整；再次增长不能继续套用压缩前比例。route/rewind 清校准，累计账本不变。冷恢复从持久化 Behavior/Goal 授权初始化请求作用域，并在运行时协调后同步最终 scope，随后才公布会话。普通和技能请求统一以已校准输入加 task clamp 后的显式输出上限检查总窗口；None 不虚构后端默认预留。见 [有效计数](../openspec/specs/model-sampling/spec.md#requirement-context-mutations-use-effective-request-estimates)、[冷恢复](../openspec/specs/model-sampling/spec.md#requirement-cold-context-pressure-follows-portable-replay) 和 [窗口准入](../openspec/specs/model-sampling/spec.md#requirement-known-input-overflow-cannot-bypass-provider-admission)。
+
+若工具调用响应的 `total_tokens` 为 0，当前请求压力沿用已有校准及本地增量，下一次正数回执仍可校准。该回执的用量由原 attempt 账本结算。排查状态栏突降时，按时间对照 Messages 终态 usage 与 Shell 发出的 `contextUsedTokens`。见 [当前请求计数契约](../openspec/specs/model-sampling/spec.md#requirement-context-mutations-use-effective-request-estimates)。
 
 同一 turn 在 Step 边界实际换路由后，已获准的下一 Step 通过持久化 AutoContinue 接手保留历史。该内部 user 边界不增加用户授权或重新执行工具；同路由 effort 变化不追加，已有异步压缩续接则复用，写入失败不派发下一请求。跨 provider 的“缺少 reasoning”拒绝可能来自不兼容的旧工具调用 ID，不能据此认定全部历史 reasoning 都会占用新模型窗口。仍保留独立的显式输出预留检查。见 [跨路由续接](../openspec/specs/model-sampling/spec.md#requirement-cross-route-continuation-hands-off-completed-history-at-an-admitted-step)。
 

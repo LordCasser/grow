@@ -35,6 +35,13 @@ fn same_model_window_reduction_rejects_known_pressure_before_provider_dispatch()
                 .expect_err("known oversized request must fail before provider admission");
 
             assert_eq!(server.messages_request_count(), 0);
+            assert!(
+                !actor
+                    .chat_state_handle
+                    .allows_autonomous_context(None)
+                    .await,
+                "an oversized turn with no eligible summary range also parks automatic work"
+            );
             let (updates, _) = drain_session_updates(&mut notifications);
             assert_eq!(
                 updates

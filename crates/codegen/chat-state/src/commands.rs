@@ -710,6 +710,11 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<u64>,
     },
 
+    AllowsAutonomousContext {
+        output_cap: Option<u32>,
+        reply: oneshot::Sender<bool>,
+    },
+
     /// Retrieve the most recent stashed per-turn `TokenUsage`. Returns
     /// `None` until at least one `RecordLastTurnUsage` has been processed.
     GetLastTurnUsage {

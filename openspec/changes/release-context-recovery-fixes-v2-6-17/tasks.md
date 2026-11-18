@@ -1,0 +1,3 @@
+- [x] Confirm the last public release and update patch metadata and release notes.
+- [x] Complete local checks and independent architecture re-review.
+- [ ] Validate the annotated tag, run the official release gates, and verify the public assets.

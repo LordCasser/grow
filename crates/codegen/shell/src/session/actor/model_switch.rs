@@ -1971,12 +1971,13 @@ impl SessionActor {
                             .unwrap_or("non-string panic payload")
                             .to_string()
                     });
-            // Re-enter the single idle arbiter after releasing the foreground
-            // fence. It will promote queued prompts/compaction/notifications
-            // in their normal priority order, or schedule Goal continuation.
-            session.idle_arbiter.notify_waiters();
             match result {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    // Leave a permit even if the mailbox is servicing a
+                    // command when the committed recovery route becomes idle.
+                    session.idle_arbiter.notify_one();
+                    Ok(())
+                }
                 Err(panic) => {
                     let message = format!("Sampling/Agent control worker panicked: {panic}");
                     {

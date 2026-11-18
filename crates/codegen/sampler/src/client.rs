@@ -126,66 +126,86 @@ fn sparse_response_failure(data: &str) -> Option<SamplingError> {
     ))
 }
 
-/// Normalizations that let the locked SDK accept otherwise-known Responses
-/// events, applied in priority order to a decode copy only. Callers keep the
-/// raw evidence, so diagnostics and a surviving candidate use original facts.
+/// Normalize only the typed-decode copy. The transport has already captured
+/// the original bytes, and usage availability is still derived from them.
 fn normalize_response_event(data: &str) -> Option<String> {
-    normalize_response_usage_details(data)
+    let annotated = normalize_text_annotations(data);
+    normalize_response_usage_details(annotated.as_deref().unwrap_or(data))
+        .or(annotated)
         .or_else(|| normalize_added_function_call_arguments(data))
-        .or_else(|| normalize_added_text_part_annotations(data))
 }
 
-/// Only an initial empty output_text part may omit annotations. The original
-/// SSE bytes remain untouched; later part.done and terminal snapshots still
-/// require the SDK's complete fields.
-fn normalize_added_text_part_annotations(data: &str) -> Option<String> {
-    let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("response.content_part.added")
-    {
-        return None;
+/// Complete an absent annotations array at the Responses output-text paths.
+/// Splice only the missing member so the SDK still sees the original types,
+/// identities and duplicate fields, even in other items of the same event.
+fn normalize_text_annotations(data: &str) -> Option<String> {
+    use serde_json::value::RawValue;
+
+    #[derive(Deserialize)]
+    struct Snapshot<'a> {
+        #[serde(borrow)]
+        output: Vec<&'a RawValue>,
     }
-    let serde_json::Value::Object(part) = value.get_mut("part")? else {
-        return None;
+    #[derive(Deserialize)]
+    struct Item<'a> {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(borrow)]
+        content: Vec<&'a RawValue>,
+    }
+
+    // These maps locate raw parts only. Their collapsed keys are never
+    // serialized or sent to the SDK.
+    let event: std::collections::HashMap<String, &RawValue> = serde_json::from_str(data).ok()?;
+    let kind: String = serde_json::from_str(event.get("type")?.get()).ok()?;
+    let parts = match kind.as_str() {
+        "response.content_part.added" | "response.content_part.done" => vec![*event.get("part")?],
+        kind => {
+            let items = match kind {
+                "response.output_item.done" => vec![*event.get("item")?],
+                "response.completed" | "response.incomplete" | "response.failed" => {
+                    serde_json::from_str::<Snapshot>(event.get("response")?.get())
+                        .ok()?
+                        .output
+                }
+                _ => return None,
+            };
+            items
+                .into_iter()
+                .filter_map(|item| serde_json::from_str::<Item>(item.get()).ok())
+                .filter(|item| item.kind == "message")
+                .flat_map(|item| item.content)
+                .collect()
+        }
     };
-    if part.get("type").and_then(serde_json::Value::as_str) != Some("output_text")
-        || part.get("text").and_then(serde_json::Value::as_str) != Some("")
-        || part.contains_key("annotations")
-    {
-        return None;
+
+    let initial = kind == "response.content_part.added";
+    let mut normalized = None;
+    // Walk the raw parts from the end so earlier offsets remain valid.
+    for raw in parts.into_iter().rev() {
+        let Ok(part) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw.get())
+        else {
+            continue;
+        };
+        if part.get("type").and_then(serde_json::Value::as_str) != Some("output_text")
+            || !part
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| !initial || text.is_empty())
+            || part.contains_key("annotations")
+        {
+            continue;
+        }
+        let start = borrowed_slice_offset(data, raw.get())?;
+        normalized
+            .get_or_insert_with(|| data.to_owned())
+            .replace_range(
+                start..start + raw.get().len(),
+                &prepend_json_member(raw.get(), "\"annotations\":[]")?,
+            );
     }
-    // Re-encoding Value would discard repeated keys. Inspect only fields the
-    // SDK knows on this event and part; leave their types and presence to it.
-    #[derive(Default, Deserialize)]
-    #[serde(default)]
-    struct TextPartFields {
-        #[serde(rename = "type")]
-        _kind: serde::de::IgnoredAny,
-        #[serde(rename = "annotations")]
-        _annotations: serde::de::IgnoredAny,
-        #[serde(rename = "logprobs")]
-        _logprobs: serde::de::IgnoredAny,
-        #[serde(rename = "text")]
-        _text: serde::de::IgnoredAny,
-    }
-    #[derive(Default, Deserialize)]
-    #[serde(default)]
-    struct AddedTextPartFields {
-        #[serde(rename = "type")]
-        _kind: serde::de::IgnoredAny,
-        #[serde(rename = "sequence_number")]
-        _sequence_number: serde::de::IgnoredAny,
-        #[serde(rename = "item_id")]
-        _item_id: serde::de::IgnoredAny,
-        #[serde(rename = "output_index")]
-        _output_index: serde::de::IgnoredAny,
-        #[serde(rename = "content_index")]
-        _content_index: serde::de::IgnoredAny,
-        #[serde(rename = "part")]
-        _part: TextPartFields,
-    }
-    serde_json::from_str::<AddedTextPartFields>(data).ok()?;
-    part.insert("annotations".to_owned(), serde_json::json!([]));
-    Some(value.to_string())
+    normalized
 }
 
 /// The locked SDK requires `arguments` on every function-call item, but a
@@ -3779,7 +3799,7 @@ mod tests {
                 "type": "output_text", "text": "", "annotations": annotations
             }))[2]
                 .to_string();
-            assert!(normalize_added_text_part_annotations(&added).is_none());
+            assert!(normalize_text_annotations(&added).is_none());
             let rs::ResponseStreamEvent::ResponseContentPartAdded(event) =
                 decode_response_event(&added).unwrap().unwrap()
             else {
@@ -3847,25 +3867,6 @@ mod tests {
         let mut bad_index = added.clone();
         bad_index["content_index"] = serde_json::json!("zero");
         assert!(decode_response_event(&bad_index.to_string()).is_err());
-
-        // A valid initial part cannot grant defaults to a later snapshot.
-        for (index, pointer) in [
-            (4, "/part"),
-            (5, "/item/content/0"),
-            (6, "/response/output/0/content/0"),
-        ] {
-            let mut invalid = events[index].clone();
-            invalid
-                .pointer_mut(pointer)
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .remove("annotations");
-            assert!(
-                decode_response_event(&invalid.to_string()).is_err(),
-                "{invalid}"
-            );
-        }
     }
 
     #[test]
@@ -3938,9 +3939,8 @@ mod tests {
             );
         }
 
-        // The actual SDK rejects a duplicate on an otherwise complete part,
-        // while Value re-encoding silently erases it. This is why the guard
-        // must inspect the original JSON before adding annotations.
+        // The SDK rejects a duplicate on an otherwise complete part, while
+        // Value re-encoding would erase the duplicate before validation.
         let annotated = base.replace(r#""text":""}"#, r#""text":"","annotations":[]}"#);
         let duplicate = format!(
             r#"{},"sequence_number":4}}"#,
@@ -4210,6 +4210,24 @@ mod tests {
                 }
             }),
         ]
+    }
+
+    fn responses_text_events_without_annotations() -> Vec<serde_json::Value> {
+        let mut events =
+            responses_text_events(serde_json::json!({"type": "output_text", "text": ""}));
+        for (index, pointer) in [
+            (4, "/part"),
+            (5, "/item/content/0"),
+            (6, "/response/output/0/content/0"),
+        ] {
+            events[index]
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("annotations");
+        }
+        events
     }
 
     #[test]
@@ -4496,8 +4514,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_empty_text_part_without_annotations_completes_with_valid_snapshots() {
-        let events = responses_text_events(serde_json::json!({"type": "output_text", "text": ""}));
+    async fn responses_text_snapshots_without_annotations_complete_and_keep_raw_evidence() {
+        let mut events = responses_text_events_without_annotations();
+        events[6]["response"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("input_tokens_details");
         assert!(
             !events[2]["part"]
                 .as_object()
@@ -4527,7 +4549,8 @@ mod tests {
             .expect("raw response evidence")
             .body;
         assert_eq!(raw_evidence.as_slice(), raw_body.as_bytes());
-        let response = result.expect("complete annotated snapshots must finish the text response");
+        let response =
+            result.expect("valid text snapshots must finish the response without annotations");
         assert_eq!(response.assistant_text(), "Hello, world!");
         assert_eq!(response.stop_reason, Some(sampling_types::StopReason::Stop));
         assert_eq!(
@@ -4535,6 +4558,7 @@ mod tests {
             Some("test-model")
         );
         assert_eq!(response.usage.as_ref().unwrap().total_tokens, 105);
+        assert_eq!(response.usage.as_ref().unwrap().cache_read_tokens(), None);
         assert!(response.provider_terminal.is_some());
     }
 
@@ -4558,10 +4582,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_empty_text_part_then_eof_does_not_complete() {
-        let mut events =
-            responses_text_events(serde_json::json!({"type": "output_text", "text": ""}));
-        events.truncate(4); // created, item added, part added, delta; no terminal
+    async fn responses_text_snapshots_without_annotations_then_eof_do_not_complete() {
+        let mut events = responses_text_events_without_annotations();
+        events.pop(); // Keep the closed text and item, but no response terminal.
         let (client, server) = responses_stream_client(responses_sse(&events)).await;
         let result = client
             .conversation_collect(ConversationRequest::new())
@@ -4569,12 +4592,12 @@ mod tests {
         server.abort();
         assert!(
             matches!(result, Err(SamplingError::IncompleteStream { .. })),
-            "an accepted initial part and text delta never imply completion: {result:?}"
+            "a closed text item never implies response completion: {result:?}"
         );
     }
 
     #[tokio::test]
-    async fn responses_empty_text_part_does_not_repair_later_snapshots() {
+    async fn responses_text_snapshots_reject_explicit_null_annotations() {
         for (index, pointer) in [
             (4, "/part"),
             (5, "/item/content/0"),
@@ -4582,12 +4605,7 @@ mod tests {
         ] {
             let mut events =
                 responses_text_events(serde_json::json!({"type": "output_text", "text": ""}));
-            events[index]
-                .pointer_mut(pointer)
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .remove("annotations");
+            events[index].pointer_mut(pointer).unwrap()["annotations"] = serde_json::Value::Null;
             let (client, server) = responses_stream_client(responses_sse(&events)).await;
             let result = client
                 .conversation_collect(ConversationRequest::new())
@@ -4595,9 +4613,39 @@ mod tests {
             server.abort();
             assert!(
                 matches!(result, Err(SamplingError::Serialization(_))),
-                "missing annotations at later index {index} must fail: {result:?}"
+                "null annotations at index {index} must fail: {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn responses_text_annotation_completion_preserves_other_snapshot_members() {
+        let mut terminal = responses_text_events_without_annotations().pop().unwrap();
+        let content = terminal["response"]["output"][0]["content"]
+            .as_array_mut()
+            .unwrap();
+        let citation = serde_json::json!({
+            "type": "url_citation", "start_index": 0, "end_index": 5,
+            "title": "Source", "url": "https://example.test/source"
+        });
+        content.push(
+            serde_json::json!({"type": "output_text", "text": "source", "annotations": [citation]}),
+        );
+        content.push(serde_json::json!({"type": "output_text", "text": "next"}));
+        let original = terminal
+            .to_string()
+            .replacen('{', r#"{"part":1,"part":2,"#, 1);
+        let normalized = normalize_text_annotations(&original).unwrap();
+        assert_eq!(normalized.replacen("\"annotations\":[],", "", 2), original);
+        assert!(decode_response_event(&normalized).unwrap().is_some());
+
+        let duplicate_id =
+            original.replace(r#""id":"msg-text""#, r#""id":"other","id":"msg-text""#);
+        let error = decode_response_event(&duplicate_id).unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate field `id`"),
+            "{error}"
+        );
     }
 
     async fn responses_stream_client(

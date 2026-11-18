@@ -783,6 +783,18 @@ impl SessionActor {
         if state
             .pending_inputs
             .front()
+            .is_some_and(|front| !front.notification_ids.is_empty())
+            && !self.can_start_idle_model_turn(&state).await
+        {
+            // Drop only the provisional queue entry. The inbox remains the
+            // authoritative owner until a Turn durably consumes its receipts.
+            state.pending_inputs.pop_front();
+            self.idle_arbiter.notify_one();
+            return;
+        }
+        if state
+            .pending_inputs
+            .front()
             .and_then(|item| item.queue_meta.as_ref())
             .is_some_and(|meta| state.queue_edit_holds.contains_key(&meta.id))
         {
@@ -1075,7 +1087,9 @@ impl SessionActor {
     ) {
         {
             let state = self.state.lock().await;
-            if !is_session_idle_for_injection(&state) {
+            if !is_session_idle_for_injection(&state)
+                || !self.can_start_idle_model_turn(&state).await
+            {
                 return;
             }
         }
@@ -1261,7 +1275,9 @@ impl SessionActor {
         let (respond_to, _) = tokio::sync::oneshot::channel();
         {
             let mut state = self.state.lock().await;
-            if !is_session_idle_for_injection(&state) {
+            if !is_session_idle_for_injection(&state)
+                || !self.can_start_idle_model_turn(&state).await
+            {
                 return;
             }
             state.pending_inputs.push_back(InputItem {

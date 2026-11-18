@@ -1,0 +1,3 @@
+- [x] Verify reported counters from saved session evidence and reproduce the zero anchor in the Shell actor.
+- [x] Ignore zero totals for context calibration and verify subsequent local growth, re-anchoring and unchanged billing facts.
+- [x] Update the development guide and validate the contract and relevant tests.

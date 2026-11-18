@@ -1440,6 +1440,15 @@ impl ChatStateHandle {
         .unwrap_or(0)
     }
 
+    /// Whether retained context permits a new autonomous primary turn.
+    pub async fn allows_autonomous_context(&self, output_cap: Option<u32>) -> bool {
+        self.query("AllowsAutonomousContext", |reply| {
+            ChatStateCommand::AllowsAutonomousContext { output_cap, reply }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Retrieve the most recent stashed per-turn `TokenUsage`. Returns
     /// `None` if no model turn has completed in this session yet, or if
     /// the actor channel is closed.

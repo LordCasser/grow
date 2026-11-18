@@ -1441,6 +1441,8 @@ fn workflow_guidance_survives_mid_turn_compaction_once() {
 /// resampling forever. Sampling is bounded (exactly two requests).
 #[test]
 fn context_window_exceeded_converged_over_window_fails_turn() {
+    use test_support::{InferenceEndpoint, InferenceRequestMatcher};
+
     run_with_session_stack(|| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1464,19 +1466,49 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
                 "compacted summary: {}",
                 "filler sentence that keeps the summary above the minimum seed length. ".repeat(20)
             );
-            server.enqueue_response(
-                "/v1/messages",
+            let mut summary = server.expect_response_blocked(
+                "foreground summary",
+                InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
                 messages_turn(&[(&long_summary, END_TURN)], END_TURN),
             );
             let (actor, mut gateway_rx) =
                 actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+            use tools::implementations::grow_build::{
+                read_file::ReadFileTool, todo::TodoWriteTool,
+            };
+            use tools::registry::types::ToolConfig;
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                ToolConfig::for_tool::<TodoWriteTool>(),
+                ToolConfig::for_tool::<ReadFileTool>(),
+            ])
+            .await;
             // Keep the static estimate below the 85% preflight trigger, but
             // make the retained tail large enough that removing the 6K-token
             // source still leaves provider-anchored pressure over the 100K
             // window after applying the signed Surface reduction.
             seed_closed_compaction_range(&actor, 150_000).await;
 
-            let result = run_user_turn(&actor, "ctx-converged").await;
+            let turn = tokio::task::spawn_local({
+                let actor = actor.clone();
+                async move { run_user_turn(&actor, "ctx-converged").await }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), summary.wait_blocked())
+                .await
+                .expect("the first compaction must reach its summary");
+            let receipt = actor
+                .receive_notification(
+                    chat_state::NotificationSource::TaskCompleted {
+                        task_id: "context-recovery-task".into(),
+                        task_kind: chat_state::NotificationTaskKind::Task,
+                        owner: chat_state::NotificationOwner::Session,
+                    },
+                    chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                    "context recovery task finished".into(),
+                )
+                .await
+                .unwrap();
+            summary.release();
+            let result = turn.await.unwrap();
             let err = result.expect_err("turn must fail after converged-over-window");
             let message = err
                 .data
@@ -1544,6 +1576,108 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
             assert!(
                 !updates.iter().any(|kind| kind == "auto_compact_failed"),
                 "a post-commit convergence error must not present compaction as failed: {updates:?}"
+            );
+
+            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+            let arbitrate = || {
+                crate::session::actor::idle_arbitration::arbitrate_idle_wake(
+                    actor.clone(),
+                    completion_tx.clone(),
+                )
+            };
+            arbitrate().await;
+            assert!(actor.state.lock().await.foreground.is_idle());
+            assert_eq!(server.messages_request_count(), 2);
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .unwrap()[0]
+                    .id,
+                receipt,
+                "the small route must leave the receipt in the durable inbox"
+            );
+
+            for (model, window, output) in [
+                ("still-too-small", 150_000, Some(150_000)),
+                ("recovered", 400_000, Some(8_000)),
+            ] {
+                let model_id = crate::agent::models::ModelId::new(format!("provider/{model}"));
+                let mut config = actor.model_route.snapshot().sampling_config;
+                config.model = model.into();
+                config.context_window = window;
+                config.output_limit = output;
+                config.base_url = server.url();
+                config.api_backend = sampling_types::ApiBackend::Messages;
+                config.api_key = Some("test-key".into());
+                let catalog = SessionActor::published_catalog_for_test(
+                    model_id.clone(),
+                    config.clone(),
+                    None,
+                    std::time::Duration::from_secs(60),
+                    0,
+                    85,
+                );
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_session_model_selection(
+                        SessionActor::selection_route_for_test(model_id, config, 85),
+                        Some(catalog),
+                        None,
+                        tx,
+                    )
+                    .await;
+                tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                    .await
+                    .expect("idle model control must resolve without waiting for another summary")
+                    .unwrap()
+                    .unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.idle_arbiter.notified(),
+                )
+                .await
+                .expect("applied idle control must wake arbitration");
+                if model == "still-too-small" {
+                    arbitrate().await;
+                    assert!(actor.state.lock().await.foreground.is_idle());
+                    assert_eq!(server.messages_request_count(), 2);
+                }
+            }
+
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[("saw the task completion", END_TURN)], END_TURN),
+            );
+            arbitrate().await;
+            let (id, result) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx.recv())
+                    .await
+                    .expect("receipt should run against the recovered route")
+                    .unwrap();
+            assert!(id.starts_with("notifications-"));
+            result.unwrap();
+            let requests = server.request_bodies();
+            assert_eq!(requests.len(), 3, "recovery needs no second summary");
+            assert_eq!(requests[2]["model"], "recovered");
+            assert!(
+                actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let mut route = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            route.context_window = std::num::NonZeroU64::new(100_000).unwrap();
+            actor.chat_state_handle.update_sampling_config(route);
+            assert!(
+                actor
+                    .chat_state_handle
+                    .allows_autonomous_context(None)
+                    .await,
+                "a successful provider turn retires the old failure evidence"
             );
         }));
     });

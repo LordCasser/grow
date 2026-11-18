@@ -617,6 +617,88 @@ async fn preserves_projection_when_response_has_no_usage() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn zero_usage_tool_response_preserves_current_context_pressure() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let actor = create_test_actor(0, 1_048_576, 85, gateway_tx, persistence_tx).await;
+            start_test_turn(&actor, "context-pressure").await;
+            let prompt_index = actor
+                .chat_state_handle
+                .current_prompt_index()
+                .await
+                .unwrap();
+            let measured = response_with_usage(167_082);
+            settle_attempt(&actor, "metered", prompt_index, "provider/model", &measured).await;
+            actor
+                .record_response_token_usage(&measured, None, None, None, true)
+                .await
+                .unwrap();
+            assert_eq!(actor.build_session_info().await.context.used, 167_082);
+
+            actor
+                .chat_state_handle
+                .push_user_message_durably(ConversationItem::user("more context ".repeat(600)))
+                .await
+                .unwrap();
+            let projected = actor.build_session_info().await.context.used;
+            assert!(projected > 167_082);
+
+            let frames = [
+                serde_json::json!({"type":"message_start", "message": {
+                    "type":"message", "id":"msg-tool", "role":"assistant", "model":"test-model",
+                    "content":[], "usage":{"input_tokens":0,"output_tokens":0}
+                }}),
+                serde_json::json!({"type":"content_block_start", "index":0, "content_block": {
+                    "type":"tool_use", "id":"call-1", "name":"test_tool", "input":{}
+                }}),
+                serde_json::json!({"type":"content_block_stop", "index":0}),
+                serde_json::json!({"type":"message_delta", "delta":{"stop_reason":"tool_use"}, "usage": {
+                    "input_tokens":0, "output_tokens":0, "cache_read_input_tokens":0, "cache_creation_input_tokens":0
+                }}),
+                serde_json::json!({"type":"message_stop"}),
+            ];
+            let frames = futures_util::stream::iter(
+                frames.map(|frame| Ok(serde_json::from_value(frame).unwrap())),
+            );
+            let (response, _) = sampler::collect_response(sampler::stream_messages(
+                Box::pin(frames),
+                None,
+                "zero-tool".into(),
+                std::time::Duration::from_secs(1),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(response.usage.as_ref().unwrap().total_tokens, 0);
+            assert_eq!(response.tool_calls().len(), 1);
+            settle_attempt(&actor, "zero-tool", prompt_index, "provider/model", &response).await;
+            actor
+                .record_response_token_usage(&response, None, None, None, true)
+                .await
+                .unwrap();
+            assert_eq!(actor.build_session_info().await.context.used, projected);
+
+            let totals = actor
+                .chat_state_handle
+                .try_get_session_usage()
+                .await
+                .unwrap()
+                .totals;
+            assert_eq!(totals.model_calls, 2);
+            assert_eq!(totals.input_tokens + totals.output_tokens, 167_082);
+
+            let next = response_with_usage(181_000);
+            actor
+                .record_response_token_usage(&next, None, None, None, true)
+                .await
+                .unwrap();
+            assert_eq!(actor.build_session_info().await.context.used, 181_000);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn final_request_schema_is_visible_to_pre_sampling_pressure() {
     let local = tokio::task::LocalSet::new();
     local

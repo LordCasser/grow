@@ -1270,7 +1270,7 @@ This initialization SHALL NOT change cumulative consumption or durable conversat
 - **THEN** the current context pressure and provider calibration remain intact.
 
 ### Requirement: Context mutations use effective request estimates
-ChatState SHALL compute context pressure from the effective current request input estimate with the current route's provider calibration. Raw Surface content omitted from replay SHALL NOT be subtracted from provider-visible pressure. Surface mutation, request assembly, native reset and learned reasoning changes SHALL preserve this coordinate; repeated request projection SHALL be idempotent. Route replacement and rewind SHALL reset calibration; other replacements SHALL retain valid same-route calibration. Failed durable writes SHALL NOT publish changed pressure. Lifetime usage SHALL remain independent.
+ChatState SHALL compute context pressure from the effective current request input estimate with the current route's provider calibration. Raw Surface content omitted from replay SHALL NOT be subtracted from provider-visible pressure. Surface mutation, request assembly, native reset and learned reasoning changes SHALL preserve this coordinate; repeated request projection SHALL be idempotent. Route replacement and rewind SHALL reset calibration; other replacements SHALL retain valid same-route calibration. Failed durable writes SHALL NOT publish changed pressure. Lifetime usage SHALL remain independent. An admitted response with a zero reported total SHALL leave the current context projection and its calibration intact. Its provider usage SHALL continue through the ordinary attempt ledger.
 
 #### Scenario: Compaction removes mostly omitted reasoning
 - **WHEN** raw removed history exceeds the current pressure while portable retained history is nonempty
@@ -1291,6 +1291,11 @@ ChatState SHALL compute context pressure from the effective current request inpu
 #### Scenario: Complete provider context is lower than the heuristic
 - **WHEN** 已接纳响应提供完整可信 context count，数值低于当前有效本地估值
 - **THEN** 压力精确接纳该锚点，消费账本不因此改写；后续追加按本地增量计入，缩小 footprint 按当前校准参考比例重算，不以负差分饱和丢失保留内容；重复 build 不重复调整。
+
+#### Scenario: A tool-call response reports zero usage
+
+- **WHEN** an admitted response reports zero total tokens while the current request has context, including after a prior positive provider observation
+- **THEN** the current context projection retains the existing calibration and local growth, the next positive observation can calibrate it again, and the attempt retains its reported usage.
 
 #### Scenario: Low provider calibration survives multiple compactions and regrowth
 - **WHEN** 低值provider锚点后执行多次合法压缩、增长和重复请求构建
@@ -1627,29 +1632,34 @@ Responses decoding SHALL accept an absent arguments field only in a response.out
 - **WHEN** the initial function item is accepted but the stream lacks valid completion or subsequent identities or arguments conflict
 - **THEN** sampling rejects the candidate under the existing protocol and incomplete-stream rules and does not admit an executable call.
 
-### Requirement: Initial Responses empty text parts may omit empty annotations
+### Requirement: Responses text snapshots may omit empty annotations
 
-For a known `response.content_part.added` event whose part is `output_text`, whose explicit text is empty and whose annotations key is absent, the sampler SHALL supply an empty annotations array only to the typed-decode copy. Original evidence and existing completed-response validation SHALL remain authoritative. This exception SHALL NOT repair done or terminal snapshots or hide other known-event decode errors.
+The Responses SSE decoder SHALL supply an empty annotations array to the typed-decode copy when an `output_text` part has a string `text` and omits the `annotations` key in `response.content_part.done`, an assistant message in `response.output_item.done`, or an assistant message in a terminal response snapshot. In `response.content_part.added` the default SHALL apply only when the explicit text is empty. Original evidence and the SDK and protocol checks for all other members SHALL remain authoritative. The annotation default SHALL compose with the existing terminal usage-detail completion.
 
 #### Scenario: Initial empty text part omits annotations
 
 - **WHEN** a Responses stream opens an empty output_text part without annotations and later supplies a valid completed response
-- **THEN** the initial event decodes with an empty annotations list, later text and completion are processed normally, and the original raw event remains unchanged.
+- **THEN** the decoder supplies an empty annotations list for the part and retains the original raw event.
+
+#### Scenario: Closing snapshots omit annotations
+
+- **WHEN** part-done, item-done and terminal snapshots contain text with absent annotations, including a terminal that also omits usage details
+- **THEN** a valid stream completes with its original text and usage semantics, and the raw SSE evidence retains all omissions.
 
 #### Scenario: Existing annotations are present
 
-- **WHEN** the initial part already includes an empty or nonempty valid annotations array
-- **THEN** the sampler preserves the provided annotations exactly and does not replace them with an inferred list.
+- **WHEN** an applicable text part contains an annotations key with an array, null, a wrong type or a duplicate key
+- **THEN** the decoder preserves the supplied members and the SDK validates them as before.
 
 #### Scenario: Malformed or unsupported missing-field shape
 
-- **WHEN** annotations is null or a wrong type, the initial text is nonempty with annotations absent, a done or terminal snapshot omits annotations, or another known field is invalid or duplicated
-- **THEN** the known event remains rejected by its existing typed or protocol validation and is not repaired by the initial-empty-text exception.
+- **WHEN** an initial part is nonempty with annotations absent, or an otherwise eligible event has conflicting, missing or invalid required fields
+- **THEN** the known event remains rejected by typed or protocol validation.
 
 #### Scenario: No valid completion follows
 
-- **WHEN** an accepted initial empty text part is followed by EOF or an existing terminal or identity validation failure
-- **THEN** the sampler does not report a completed response merely because the initial annotations list was inferred.
+- **WHEN** an accepted text part is followed by EOF or an existing terminal or identity validation failure
+- **THEN** the annotation default does not admit a completed response.
 
 ### Requirement: Sparse Responses failure envelopes preserve provider errors
 

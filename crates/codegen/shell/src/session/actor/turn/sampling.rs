@@ -2455,8 +2455,9 @@ impl SessionActor {
         })
     }
 
-    /// Only admitted output may replace the context-pressure estimate. Spending
-    /// was settled per provider attempt before the sampler returned this candidate.
+    /// A positive context observation from admitted output can replace the
+    /// current estimate. A zero usage report can settle an attempt without
+    /// measuring the context carried by the request.
     pub(crate) async fn record_response_token_usage(
         &self,
         response: &ConversationResponse,
@@ -2465,7 +2466,10 @@ impl SessionActor {
         _admitted_goal_id: Option<&str>,
         accept_context_anchor: bool,
     ) -> Result<(), String> {
-        if accept_context_anchor && let Some(usage) = &response.usage {
+        if accept_context_anchor
+            && let Some(usage) = &response.usage
+            && usage.total_tokens > 0
+        {
             self.chat_state_handle
                 .record_provider_context_anchor(u64::from(usage.total_tokens));
         }

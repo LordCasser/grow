@@ -2497,8 +2497,8 @@ impl SessionActor {
             sampling_recovery = sampler::RecoveryBudget::default();
             *self.sampling_continuation.borrow_mut() = Some(sampling_recovery.clone());
             // The response Surface facts must precede the provider anchor.
-            // With usage, the anchor replaces their local estimates; without
-            // usage, the estimates remain as fail-safe context pressure.
+            // A measured provider total replaces their local estimates.
+            // Missing or zero totals leave the current projection in place.
             self.record_response_token_usage(
                 &response,
                 Some(model_duration_ms),

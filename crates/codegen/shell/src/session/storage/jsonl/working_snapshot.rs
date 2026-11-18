@@ -4787,6 +4787,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_window_failure_parks_pending_receipt_after_indexed_cold_load() {
+        use chat_state::{
+            NotificationEvent, NotificationOwner, NotificationSource, NotificationSourceVersion,
+            NotificationTaskKind, TurnTerminal, TurnTerminalSource,
+        };
+
+        for failure_in_tail in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (storage, info) = fixture(root.path());
+            storage
+                .init_session(&info, default_model_id())
+                .await
+                .unwrap();
+            let directory = storage.open_session(&info).unwrap().directory_handle();
+            let body = "background task completed while context was exhausted";
+            let payload_ref =
+                crate::session::notification_inbox::write_payload(&directory, body).unwrap();
+            let source = NotificationSource::TaskCompleted {
+                task_id: "pending-context-recovery".into(),
+                task_kind: NotificationTaskKind::Task,
+                owner: NotificationOwner::Session,
+            };
+            let source_version = NotificationSourceVersion::Ordinal { value: 1 };
+            let receipt_id =
+                chat_state::notification_id(info.id.0.as_ref(), &source, &source_version).unwrap();
+            let mut dense = chat_state::Timeline::default();
+            dense
+                .append(
+                    ConversationItem::system("retained context"),
+                    MessageCause::Seed,
+                )
+                .unwrap();
+            let turn = TurnId(1);
+            dense
+                .record(turn_start(turn, "failed context request", 1, 0))
+                .unwrap();
+            dense
+                .record(TimelineEventKind::Notification(
+                    NotificationEvent::Received {
+                        id: receipt_id.clone(),
+                        owner_session_id: info.id.to_string(),
+                        source,
+                        source_version,
+                        payload_ref: payload_ref.clone(),
+                    },
+                ))
+                .unwrap();
+            for event in dense.events() {
+                storage
+                    .append_timeline_event_durable(&info, event)
+                    .await
+                    .unwrap();
+            }
+            if failure_in_tail {
+                publish(&storage, &info, &mut dense, "before-context-failure").await;
+            }
+            let failure = dense
+                .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                    id: turn,
+                    outcome: "error".into(),
+                    duration_ms: 1,
+                    tool_count: 0,
+                    terminal: TurnTerminal {
+                        source: TurnTerminalSource::Host,
+                        stop_reason: "error".into(),
+                        completion_kind: TurnTerminal::CONTEXT_WINDOW_EXCEEDED.into(),
+                    },
+                    cancellation_category: None,
+                    details: Some(serde_json::json!({ "context_window": 100_000 })),
+                }))
+                .unwrap();
+            storage
+                .append_timeline_event_durable(&info, &failure)
+                .await
+                .unwrap();
+            if !failure_in_tail {
+                publish(&storage, &info, &mut dense, "after-context-failure").await;
+            }
+            let cut = read_manifest(&directory).unwrap().unwrap();
+            assert_eq!(failure.seq.get() >= cut.domain_events, failure_in_tail);
+            drop(storage);
+
+            let storage = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let loaded = storage
+                .load_session_for_write_with_indexed_history(&info)
+                .await
+                .unwrap();
+            assert!(loaded.history.indexed.is_some());
+            let restored = loaded.timeline;
+            assert!(restored.has_surface_checkpoint());
+            assert_eq!(restored.active_turn(), None);
+            assert_eq!(
+                restored.pending_notifications(),
+                dense.pending_notifications()
+            );
+            assert_eq!(
+                restored
+                    .events()
+                    .iter()
+                    .any(|event| event.seq == failure.seq),
+                failure_in_tail,
+                "the published failure must be recovered from its checkpoint, while a suffix failure folds after the retained open turn"
+            );
+            assert_eq!(
+                crate::session::notification_inbox::read_payload(&directory, &payload_ref).unwrap(),
+                body
+            );
+
+            let config = sampling_types::SamplingConfig {
+                base_url: "https://example.invalid".into(),
+                model: "failed-small-model".into(),
+                output_limit: None,
+                temperature: None,
+                top_p: None,
+                api_backend: Default::default(),
+                extra_headers: Default::default(),
+                query_params: Default::default(),
+                env_http_headers: Default::default(),
+                context_window: std::num::NonZeroU64::new(100_000).unwrap(),
+                reasoning_effort: None,
+                stream_tool_calls: None,
+            };
+            let (persistence, mut writes) = chat_state::MockTimelinePersistence::new();
+            let (events, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let handle = chat_state::ChatStateActor::spawn_from_validated_timeline(
+                restored,
+                config,
+                None,
+                Box::new(persistence),
+                events,
+                cancellation.clone(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                handle.get_projected_tokens().await < 100_000,
+                "a low local estimate must not erase the restored provider failure"
+            );
+            assert!(!handle.allows_autonomous_context(None).await);
+            assert_eq!(
+                handle.pending_notifications().await.unwrap()[0].id,
+                receipt_id
+            );
+            assert!(
+                writes.drain().is_empty(),
+                "cold admission must not append or consume a receipt"
+            );
+            cancellation.cancel();
+        }
+    }
+
+    #[tokio::test]
     async fn closed_turns_do_not_expand_the_executable_checkpoint() {
         let mut counts = Vec::new();
         for closed_turns in [1, 128] {

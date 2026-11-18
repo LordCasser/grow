@@ -1,0 +1,3 @@
+- [x] Verify the saved event shapes and reproduce their failure through the HTTP/SSE reader.
+- [x] Extend decode-only text annotation completion and verify defaults compose with terminal usage completion.
+- [x] Verify existing strictness, completion rules and unchanged raw evidence. Update the development guide.

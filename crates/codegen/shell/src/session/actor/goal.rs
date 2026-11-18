@@ -58,19 +58,25 @@ impl SessionActor {
     /// Prepare the next Goal continuation without blocking the SessionCommand
     /// mailbox. Final foreground admission still happens under `state`, after
     /// pending user input and the current Goal definition are rechecked.
-    pub(super) fn schedule_goal_on_idle(
+    pub(super) async fn schedule_goal_on_idle(
         self: &std::sync::Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
         if !self.goal_loop_active() || self.goal_drive.is_running() {
             return;
         }
+        {
+            let state = self.state.lock().await;
+            if !state.pending_inputs.is_empty() || !self.can_start_idle_model_turn(&state).await {
+                return;
+            }
+        }
         let session = self.clone();
         let handle = tokio::task::spawn_local(async move {
             session.clone().drive_goal_on_idle(completion_tx).await;
             let retry = session.goal_loop_active() && {
                 let state = session.state.lock().await;
-                state.foreground.is_idle() && state.pending_inputs.is_empty()
+                state.pending_inputs.is_empty() && session.can_start_idle_model_turn(&state).await
             };
             if retry && !session.planning_waits_for_event().await {
                 session.idle_arbiter.notify_one();
@@ -791,10 +797,7 @@ impl SessionActor {
         }
         {
             let state = self.state.lock().await;
-            if !state.execution_open()
-                || !state.foreground.is_idle()
-                || !state.pending_inputs.is_empty()
-            {
+            if !state.pending_inputs.is_empty() || !self.can_start_idle_model_turn(&state).await {
                 return;
             }
         }
@@ -839,11 +842,7 @@ impl SessionActor {
         }
         let _admission_gate = self.step_control_gate.lock().await;
         let mut state = self.state.lock().await;
-        if !state.execution_open()
-            || !state.foreground.is_idle()
-            || !state.pending_inputs.is_empty()
-            || !state.pending_step_controls.is_empty()
-        {
+        if !state.pending_inputs.is_empty() || !self.can_start_idle_model_turn(&state).await {
             return;
         }
         let Some(goal_id) = self.goal_tracker.lock().snapshot().and_then(|goal| {

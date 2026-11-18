@@ -1092,6 +1092,21 @@ impl SessionActor {
                 "ok": execution.is_ok(),
             })),
         );
+        let exhausted_window = if execution.as_ref().err().is_some_and(|error| {
+            crate::sampling::error::context_window_exceeded_for_turn_error(error)
+                || error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data["context_recovery_required"].as_bool())
+                    == Some(true)
+        }) {
+            self.chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|config| config.context_window.get())
+        } else {
+            None
+        };
         let turn_tool_count = self.events.tool_count_this_turn();
         let (timeline_outcome, timeline_terminal, timeline_category, timeline_context) =
             match &execution {
@@ -1228,6 +1243,16 @@ impl SessionActor {
                         "reason": "max_turns_reached",
                         "limit": limit,
                     })),
+                ),
+                Err(_) if exhausted_window.is_some() => (
+                    crate::session::events::TurnOutcomeLabel::Error,
+                    chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
+                        stop_reason: "error".into(),
+                        completion_kind: chat_state::TurnTerminal::CONTEXT_WINDOW_EXCEEDED.into(),
+                    },
+                    None,
+                    Some(serde_json::json!({ "context_window": exhausted_window })),
                 ),
                 Err(error) => (
                     crate::session::events::TurnOutcomeLabel::Error,
