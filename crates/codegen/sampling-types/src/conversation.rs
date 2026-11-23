@@ -1652,7 +1652,7 @@ pub struct NativeContinuationProjection {
 
 /// A model skill fact is published immediately after its own tool result.
 /// It carries metadata, not a new conversation boundary or another result.
-fn is_model_skill_result_metadata(items: &[ConversationItem], index: usize) -> bool {
+pub fn is_model_skill_result_metadata(items: &[ConversationItem], index: usize) -> bool {
     matches!(items.get(index), Some(ConversationItem::SkillLoad(skill))
         if skill.source == SkillLoadSource::Model
             && index > 0
@@ -1666,6 +1666,21 @@ fn is_model_skill_result_metadata(items: &[ConversationItem], index: usize) -> b
 pub fn normalize_model_skill_results(items: &mut [ConversationItem]) -> usize {
     let mut changed = 0;
     let mut index = 0;
+    while let Some(run) = next_model_skill_result_reorder(items, index) {
+        let ordered: Vec<_> = model_skill_result_order(items, run.clone())
+            .map(|source_index| items[source_index].clone())
+            .collect();
+        index = run.end;
+        items[run].clone_from_slice(&ordered);
+        changed += 1;
+    }
+    changed
+}
+
+fn next_model_skill_result_reorder(
+    items: &[ConversationItem],
+    mut index: usize,
+) -> Option<std::ops::Range<usize>> {
     while index < items.len() {
         if !matches!(&items[index], ConversationItem::Assistant(a) if !a.tool_calls.is_empty()) {
             index += 1;
@@ -1673,38 +1688,33 @@ pub fn normalize_model_skill_results(items: &mut [ConversationItem]) -> usize {
         }
         let start = index + 1;
         let mut end = start;
-        while end < items.len()
-            && (matches!(items[end], ConversationItem::ToolResult(_))
-                || is_model_skill_result_metadata(items, end))
-        {
+        let mut saw_metadata = false;
+        let mut needs_reorder = false;
+        while end < items.len() {
+            if matches!(items[end], ConversationItem::ToolResult(_)) {
+                needs_reorder |= saw_metadata;
+            } else if is_model_skill_result_metadata(items, end) {
+                saw_metadata = true;
+            } else {
+                break;
+            }
             end += 1;
         }
-        let run = &mut items[start..end];
-        let mut saw_metadata = false;
-        let needs_reorder = run.iter().any(|item| match item {
-            ConversationItem::SkillLoad(_) => {
-                saw_metadata = true;
-                false
-            }
-            ConversationItem::ToolResult(_) => saw_metadata,
-            _ => false,
-        });
         if needs_reorder {
-            let ordered: Vec<_> = run
-                .iter()
-                .filter(|item| matches!(item, ConversationItem::ToolResult(_)))
-                .chain(
-                    run.iter()
-                        .filter(|item| matches!(item, ConversationItem::SkillLoad(_))),
-                )
-                .cloned()
-                .collect();
-            run.clone_from_slice(&ordered);
-            changed += 1;
+            return Some(start..end);
         }
         index = end;
     }
-    changed
+    None
+}
+
+fn model_skill_result_order(
+    items: &[ConversationItem],
+    run: std::ops::Range<usize>,
+) -> impl Iterator<Item = usize> + '_ {
+    run.clone()
+        .filter(move |&index| matches!(items[index], ConversationItem::ToolResult(_)))
+        .chain(run.filter(move |&index| matches!(items[index], ConversationItem::SkillLoad(_))))
 }
 
 impl NativeContinuationProjection {
@@ -2023,15 +2033,39 @@ pub fn project_portable_history_with_reasoning(
     items: &[ConversationItem],
     reasoning_backend: Option<ApiBackend>,
 ) -> Vec<ConversationItem> {
-    let mut normalized = std::borrow::Cow::Borrowed(items);
-    if items
-        .iter()
-        .enumerate()
-        .any(|(index, _)| is_model_skill_result_metadata(items, index))
-    {
-        normalize_model_skill_results(normalized.to_mut());
+    let mut projected = Vec::with_capacity(items.len());
+    visit_portable_history(items, reasoning_backend, |_, item| projected.push(item));
+    projected
+}
+
+/// Project portable history and retain each item's original index in `items`.
+/// Tool results can precede earlier skill metadata in the projected order.
+pub fn project_portable_history_with_indices(
+    items: &[ConversationItem],
+) -> Vec<(usize, ConversationItem)> {
+    let mut projected = Vec::with_capacity(items.len());
+    visit_portable_history(items, None, |index, item| projected.push((index, item)));
+    projected
+}
+
+fn visit_portable_history(
+    items: &[ConversationItem],
+    reasoning_backend: Option<ApiBackend>,
+    mut emit: impl FnMut(usize, ConversationItem),
+) {
+    let mut order = None;
+    let mut start = 0;
+    while let Some(run) = next_model_skill_result_reorder(items, start) {
+        let order = order.get_or_insert_with(|| (0..items.len()).collect::<Vec<_>>());
+        start = run.end;
+        for (output, source) in order[run.clone()]
+            .iter_mut()
+            .zip(model_skill_result_order(items, run))
+        {
+            *output = source;
+        }
     }
-    let items = normalized.as_ref();
+    let source_index = |index| order.as_ref().map_or(index, |order| order[index]);
     let mut call_counts = std::collections::BTreeMap::new();
     for item in items {
         if let ConversationItem::Assistant(assistant) = item {
@@ -2040,29 +2074,30 @@ pub fn project_portable_history_with_reasoning(
             }
         }
     }
-    let mut projected = Vec::with_capacity(items.len());
     let mut pending_reasoning = Vec::new();
     let mut index = 0;
     while index < items.len() {
-        match &items[index] {
+        let source = source_index(index);
+        match &items[source] {
             ConversationItem::Reasoning(reasoning) => {
                 if matches!(
                     reasoning_backend,
                     Some(ApiBackend::ChatCompletions | ApiBackend::Responses)
                 ) && !reasoning.text.is_empty()
                 {
-                    pending_reasoning.push(ConversationItem::Reasoning(reasoning.clone()));
+                    pending_reasoning
+                        .push((source, ConversationItem::Reasoning(reasoning.clone())));
                 }
                 index += 1;
             }
             ConversationItem::System(system) => {
                 pending_reasoning.clear();
-                projected.push(ConversationItem::System(system.clone()));
+                emit(source, ConversationItem::System(system.clone()));
                 index += 1;
             }
             ConversationItem::User(user) => {
                 pending_reasoning.clear();
-                projected.push(ConversationItem::User(user.clone()));
+                emit(source, ConversationItem::User(user.clone()));
                 index += 1;
             }
             ConversationItem::Assistant(assistant) if assistant.tool_calls.is_empty() => {
@@ -2080,16 +2115,21 @@ pub fn project_portable_history_with_reasoning(
                         || (reasoning_backend == Some(ApiBackend::Responses)
                             && !assistant.content.is_empty())
                     {
-                        projected.append(&mut pending_reasoning);
+                        for (source, reasoning) in pending_reasoning.drain(..) {
+                            emit(source, reasoning);
+                        }
                     }
-                    projected.push(ConversationItem::Assistant(AssistantItem {
-                        content: assistant.content.clone(),
-                        tool_calls: Vec::new(),
-                        model_id: None,
-                        model_fingerprint: None,
-                        reasoning_effort: None,
-                        response_messages: assistant.response_messages.clone(),
-                    }));
+                    emit(
+                        source,
+                        ConversationItem::Assistant(AssistantItem {
+                            content: assistant.content.clone(),
+                            tool_calls: Vec::new(),
+                            model_id: None,
+                            model_fingerprint: None,
+                            reasoning_effort: None,
+                            response_messages: assistant.response_messages.clone(),
+                        }),
+                    );
                 }
                 pending_reasoning.clear();
                 index += 1;
@@ -2097,7 +2137,10 @@ pub fn project_portable_history_with_reasoning(
             ConversationItem::Assistant(assistant) => {
                 let mut next = index + 1;
                 let mut results = std::collections::BTreeMap::new();
-                while let Some(ConversationItem::ToolResult(result)) = items.get(next) {
+                while next < items.len() {
+                    let ConversationItem::ToolResult(result) = &items[source_index(next)] else {
+                        break;
+                    };
                     results
                         .entry(result.tool_call_id.as_str())
                         .and_modify(|value| *value = None)
@@ -2132,7 +2175,9 @@ pub fn project_portable_history_with_reasoning(
                             .trim_start()
                             .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER))
                 {
-                    projected.append(&mut pending_reasoning);
+                    for (source, reasoning) in pending_reasoning.drain(..) {
+                        emit(source, reasoning);
+                    }
                 } else {
                     pending_reasoning.clear();
                 }
@@ -2150,28 +2195,32 @@ pub fn project_portable_history_with_reasoning(
                     || !calls.is_empty()
                     || !assistant.response_messages.is_empty()
                 {
-                    projected.push(ConversationItem::Assistant(AssistantItem {
-                        content,
-                        tool_calls: calls,
-                        model_id: None,
-                        model_fingerprint: None,
-                        reasoning_effort: None,
-                        response_messages: if assistant
-                            .content
-                            .trim_start()
-                            .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
-                        {
-                            Vec::new()
-                        } else {
-                            assistant.response_messages.clone()
-                        },
-                    }));
+                    emit(
+                        source,
+                        ConversationItem::Assistant(AssistantItem {
+                            content,
+                            tool_calls: calls,
+                            model_id: None,
+                            model_fingerprint: None,
+                            reasoning_effort: None,
+                            response_messages: if assistant
+                                .content
+                                .trim_start()
+                                .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
+                            {
+                                Vec::new()
+                            } else {
+                                assistant.response_messages.clone()
+                            },
+                        }),
+                    );
                 }
-                for item in &items[index + 1..next] {
+                for source in (index + 1..next).map(source_index) {
+                    let item = &items[source];
                     if let ConversationItem::ToolResult(result) = item
                         && retained_ids.contains(result.tool_call_id.as_str())
                     {
-                        projected.push(item.clone());
+                        emit(source, item.clone());
                     }
                 }
                 index = next;
@@ -2186,22 +2235,24 @@ pub fn project_portable_history_with_reasoning(
                 pending_reasoning.clear();
                 // Keep the canonical runtime fact intact. Provider adapters
                 // expand it only at request projection time.
-                projected.push(ConversationItem::AgentMessage(agent_messages.clone()));
+                emit(
+                    source,
+                    ConversationItem::AgentMessage(agent_messages.clone()),
+                );
                 index += 1;
             }
             ConversationItem::SkillLoad(skill) => {
                 pending_reasoning.clear();
-                projected.push(ConversationItem::SkillLoad(skill.clone()));
+                emit(source, ConversationItem::SkillLoad(skill.clone()));
                 index += 1;
             }
             ConversationItem::BackendToolCall(call) => {
                 pending_reasoning.clear();
-                projected.push(ConversationItem::assistant(call.text_summary()));
+                emit(source, ConversationItem::assistant(call.text_summary()));
                 index += 1;
             }
         }
     }
-    projected
 }
 
 #[derive(Debug, Clone)]
@@ -13188,6 +13239,85 @@ mod tests {
             prepared_body: Arc::from("private skill body"),
             prompt_index: None,
         })
+    }
+
+    #[test]
+    fn portable_history_indices_follow_source_through_reordering_and_filtering() {
+        let items = vec![
+            ConversationItem::user("same text"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("durable reasoning")),
+            assistant_with_calls(&[
+                ("skill-a", "load_skill"),
+                ("complete", "read_file"),
+                ("reused", "grep"),
+                ("missing", "grep"),
+                ("ambiguous", "grep"),
+            ]),
+            ConversationItem::tool_result("skill-a", "first skill loaded"),
+            model_skill_result("skill-a"),
+            ConversationItem::tool_result("complete", "completed result"),
+            ConversationItem::tool_result("reused", "first reused result"),
+            ConversationItem::tool_result("ambiguous", "first ambiguous result"),
+            ConversationItem::tool_result("ambiguous", "second ambiguous result"),
+            ConversationItem::BackendToolCall(BackendToolCallItem::code_interpreter(Some(
+                "print(1)",
+            ))),
+            assistant_with_calls(&[
+                ("reused", "grep"),
+                ("skill-b", "load_skill"),
+                ("later", "read_file"),
+            ]),
+            ConversationItem::tool_result("reused", "second reused result"),
+            ConversationItem::tool_result("skill-b", "second skill loaded"),
+            model_skill_result("skill-b"),
+            ConversationItem::tool_result("later", "later completed result"),
+            ConversationItem::user("same text"),
+        ];
+
+        let (indices, projected): (Vec<_>, Vec<_>) = project_portable_history_with_indices(&items)
+            .into_iter()
+            .unzip();
+        assert_eq!(indices, [0, 2, 3, 5, 4, 9, 10, 12, 14, 13, 15]);
+        for (&source, item) in indices.iter().zip(&projected) {
+            match item {
+                ConversationItem::Assistant(assistant) if source == 9 => {
+                    assert_eq!(
+                        assistant.content.as_ref(),
+                        "[backend code_interpreter] print(1)"
+                    );
+                    assert!(assistant.tool_calls.is_empty());
+                }
+                ConversationItem::Assistant(assistant) => {
+                    let expected = if source == 2 {
+                        ["skill-a", "complete"]
+                    } else {
+                        ["skill-b", "later"]
+                    };
+                    let calls: Vec<_> = assistant
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.id.as_ref())
+                        .collect();
+                    assert_eq!(calls, expected);
+                }
+                _ => assert_eq!(
+                    serde_json::to_value(item).unwrap(),
+                    serde_json::to_value(&items[source]).unwrap()
+                ),
+            }
+        }
+
+        let projected = serde_json::to_value(&projected).unwrap();
+        assert_eq!(
+            projected,
+            serde_json::to_value(project_portable_history(&items)).unwrap()
+        );
+        let mut normalized = items;
+        assert_eq!(normalize_model_skill_results(&mut normalized), 2);
+        assert_eq!(
+            projected,
+            serde_json::to_value(project_portable_history(&normalized)).unwrap()
+        );
     }
 
     #[test]

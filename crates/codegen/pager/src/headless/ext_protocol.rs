@@ -170,7 +170,9 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         AutoCompactFailed {
             error: String,
         },
-        AutoCompactCancelled {},
+        AutoCompactCancelled {
+            reason: shell::extensions::notification::AutoCompactCancelReason,
+        },
         ImageCompressed {
             message: String,
         },
@@ -242,7 +244,9 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         GrowUpdate::AutoCompactFailed { error } => {
             ExtEvent::Lifecycle(Lifecycle::CompactFailed { error })
         }
-        GrowUpdate::AutoCompactCancelled {} => ExtEvent::Lifecycle(Lifecycle::CompactCancelled),
+        GrowUpdate::AutoCompactCancelled { reason } => {
+            ExtEvent::Lifecycle(Lifecycle::CompactCancelled(reason))
+        }
         GrowUpdate::ImageCompressed { message } => {
             ExtEvent::Lifecycle(Lifecycle::ImageCompressed { message })
         }

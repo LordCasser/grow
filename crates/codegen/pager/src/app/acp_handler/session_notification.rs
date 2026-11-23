@@ -2366,13 +2366,13 @@ pub(super) fn apply_session_event(
             ));
             true
         }
-        GrowSessionUpdate::AutoCompactCancelled { .. } => {
+        GrowSessionUpdate::AutoCompactCancelled { reason } => {
             tracing::info!("Auto-compact cancelled");
             session.set_compaction_activity(None);
             session.clear_live_feedback("compaction");
             session.compact_held_prompt = None;
             scrollback.push_block(RenderBlock::session_event_with_id(
-                SessionEvent::CompactionCancelled,
+                SessionEvent::CompactionCancelled(*reason),
                 event_id.map(str::to_owned),
             ));
             true

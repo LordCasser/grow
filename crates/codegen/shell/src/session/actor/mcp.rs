@@ -659,12 +659,8 @@ impl SessionActor {
             };
             Arc::clone(client)
         };
-        let timeout = std::time::Duration::from_secs(
-            client
-                .startup_timeout_sec()
-                .saturating_mul(2)
-                .saturating_add(5),
-        );
+        let timeout =
+            crate::session::mcp_servers::initialization_budget(client.startup_timeout_sec());
         let result = tokio::time::timeout(
             timeout,
             client.get_tool_registrations(Arc::clone(&self.mcp_state)),
@@ -1183,9 +1179,8 @@ impl SessionActor {
                     let server_name = client.server_name().to_string();
                     let server_start = std::time::Instant::now();
                     let timeout_sec = client.startup_timeout_sec();
-                    let init_budget = std::time::Duration::from_secs(
-                        timeout_sec.saturating_mul(2).saturating_add(5),
-                    );
+                    let init_budget =
+                        crate::session::mcp_servers::initialization_budget(timeout_sec);
                     let registrations = match tokio::time::timeout(
                         init_budget,
                         client.get_tool_registrations(mcp_state),

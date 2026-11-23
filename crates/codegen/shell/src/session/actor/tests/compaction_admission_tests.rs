@@ -178,6 +178,111 @@ fn spawn_ack_writer(
 }
 
 #[test]
+fn foreground_compaction_retires_invalidated_summary_before_starting_replacement() {
+    stale_summary_handoff(true);
+}
+
+#[test]
+fn stale_summary_terminal_write_failure_blocks_foreground_takeover() {
+    stale_summary_handoff(false);
+}
+
+fn stale_summary_handoff(acknowledge_terminal: bool) {
+    run_with_session_stack(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
+            use chat_state::CompactionEvent::{Completed, Failed, Started, Summary};
+            use test_support::{InferenceEndpoint, InferenceRequestMatcher};
+
+            let server = MockInferenceServer::start().await.unwrap();
+            let matcher = || InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages);
+            let mut stale = server.expect_response_blocked(
+                "stale summary", matcher(), messages_turn(&[text_block("STALE_SUMMARY")], END_TURN));
+            let summary = "Evidence from the corrected history. ".repeat(40);
+            let _fresh = server.expect_response(
+                "replacement summary", matcher(), messages_turn(&[text_block(&summary)], END_TURN));
+
+            let (gateway_tx, gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, persistence_rx) = mpsc::unbounded_channel();
+            let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+            let writer = spawn_ack_writer(persistence_rx, move |event, ack| {
+                if matches!(&event.kind, chat_state::TimelineEventKind::Compaction(
+                    Failed { error, .. }) if error == "compaction_source_invalidated") {
+                    terminal_tx.send(ack).unwrap();
+                } else {
+                    let _ = ack.send(Ok(()));
+                }
+            });
+            let (actor, events) = create_test_actor_ex_with_physical_projection(
+                0, 100_000, 80, gateway_tx, persistence_tx).await;
+            let (actor, _gateway, _events) = configure_actor_with_sampler(
+                &server, sampling_types::ApiBackend::Messages, sampler::OutputDelivery::Irreversible,
+                None, actor, gateway_rx, events).await;
+            actor.compaction.pre_prune.set(false);
+            seed_closed_compaction_range(&actor).await;
+            actor.chat_state_handle.record_provider_context_anchor(75_000);
+            actor.state.lock().await.foreground =
+                ForegroundState::RegularTurn(running_task_stub("invalidated-summary"));
+            assert!(!actor.background_compaction_boundary().await.unwrap());
+            let timeout = std::time::Duration::from_secs(5);
+            tokio::time::timeout(timeout, stale.wait_blocked()).await.unwrap();
+
+            // Repair at a user boundary changes the frozen selection's Surface IDs.
+            actor.chat_state_handle.push_assistant_response(ConversationItem::assistant_tool_calls(
+                vec![sampling_types::ToolCall {
+                    id: "dangling".into(), name: "grep".into(), arguments: "{}".into(),
+                }]));
+            actor.chat_state_handle.push_user_message(prompt("continue after interruption", 2));
+            let before = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(before.iter().any(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Messages(m) if m.cause == chat_state::MessageCause::IntegrityRepair)));
+
+            let owner = actor.clone();
+            let takeover = tokio::task::spawn_local(async move {
+                owner.run_compact_only(crate::session::actor::compaction::AutoCompactTriggerInfo {
+                    tokens_used: 85_000, context_window: 100_000, percentage: 85,
+                    source: "pre_sampling", max_output_tokens: None,
+                }).await
+            });
+            let ack = tokio::time::timeout(timeout, terminal_rx.recv()).await.unwrap().unwrap();
+            assert!(!takeover.is_finished());
+            assert_eq!(server.messages_request_count(), 1);
+            let outcome = if acknowledge_terminal {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "old terminal write failed"))
+            };
+            ack.send(outcome).unwrap();
+            let result = tokio::time::timeout(timeout, takeover).await.unwrap().unwrap();
+            stale.release();
+            if acknowledge_terminal {
+                result.unwrap();
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let transactions: Vec<_> = events.iter().filter_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Compaction(c) => Some(c),
+                    _ => None,
+                }).collect();
+                assert!(matches!(transactions.as_slice(), [
+                    Started {id: old, ..}, Failed {id: retired, ..}, Started {id: new, ..},
+                    Summary {id: replaced, ..}, Completed {id: completed, ..}
+                ] if old == retired && old != new && new == replaced && new == completed), "{transactions:?}");
+                assert_eq!(server.messages_request_count(), 2);
+            } else {
+                let error = result.expect_err("an unconfirmed terminal cannot release the transaction");
+                assert!(crate::session::commands::is_fatal_turn_boundary_error(&error), "{error:?}");
+                assert!(error.to_string().contains("old terminal write failed"), "{error:?}");
+                assert_eq!(server.messages_request_count(), 1);
+            }
+            writer.abort();
+            let _ = writer.await;
+        }));
+    });
+}
+
+#[test]
 fn async_generation_cancel_before_replacement_preserves_foreground() {
     async_generation_cancellation_at_ack(false);
 }

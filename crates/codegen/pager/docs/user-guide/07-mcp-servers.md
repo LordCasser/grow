@@ -125,6 +125,10 @@ grow mcp doctor github        # Check one server
 grow mcp doctor --json        # Machine-readable output
 ```
 
+Doctor opens a fresh connection. For HTTP and SSE servers, `HTTP client created` confirms local setup. For stdio servers, `stdio process spawned` confirms the local process started. The next check reports the MCP handshake and negotiated protocol. The final check reports the tool count after all `tools/list` pages arrive.
+
+The handshake uses `startup_timeout_sec`. Tool discovery uses the time remaining in the session initialization budget (twice the startup timeout plus five seconds). A timeout names the unfinished stage. Text and JSON use the same checks. Doctor exits with status 1 if any checked server fails, and 0 if all pass. To capture the exit status in a script, run doctor directly.
+
 The transport defaults to `stdio`; pass `--transport http` or `--transport sse` for remote servers.
 
 By default `grow mcp add` writes to `~/.grow/config.toml` (`--scope user`). Use `--scope project` to write to `.grow/config.toml` in the current directory instead, which can be committed and shared with your team (see [Project-Scoped MCP Servers](#project-scoped-mcp-servers)). Header and environment variable values are stored verbatim, so reference secrets as `${VAR}` instead of pasting them into a committed project config (see [Example Configurations](#example-configurations)). `grow mcp list` shows servers from both scopes, marking project-scoped ones with `(project)` and disabled ones with `(disabled)`.

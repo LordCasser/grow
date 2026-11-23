@@ -532,7 +532,7 @@ Sampler 正常关闭 SHALL 先停止新请求准入并向活跃 provider 工作�
 
 ### Requirement: Side questions preserve completed tool evidence from their frozen context
 
-`/btw` SHALL 从一次冻结的已提交主会话上下文构造只读请求，保留其中身份有效、可无歧义配对的已完成工具调用及结果、结果附件和普通 Assistant 正文，包括连续工具交换构成的尾部。未完成调用 SHALL NOT 输出悬空工具协议或伪造执行结果，同批已完成调用 SHALL 保留。Sideband SHALL 不提供工具能力、不改变主模型 Surface，重试 SHALL 复用同一冻结输入。
+`/btw` SHALL 从一次冻结的已提交主会话上下文构造只读请求，在路由预算选中的历史中保留身份有效、可无歧义配对的已完成工具调用及结果、结果附件和普通 Assistant 正文，包括连续工具交换构成的尾部。未完成调用 SHALL NOT 输出悬空工具协议或伪造执行结果，同批已完成调用 SHALL 保留。Sideband SHALL 不提供工具能力、不改变主模型 Surface，重试 SHALL 复用同一冻结输入。
 
 #### Scenario: Completed tools are the latest context
 - **WHEN** `/btw` 冻结上下文的尾部由连续已完成工具交换组成，尚无单独的 Assistant 总结
@@ -1776,3 +1776,15 @@ Successful displayed recaps SHALL persist their frozen real-user turn count. Exi
 #### Scenario: Historical recap has no explicit coverage
 - **WHEN** legacy recap history lacks the frozen count
 - **THEN** restoration does not guess coverage from presentation order or Sideband completion.
+
+### Requirement: Side questions fit frozen evidence within the route window
+
+A user side question SHALL reserve its complete wrapped question and frozen system messages, and admit only a fitting recent suffix of portable evidence using the Sideband estimator. Each selected tool batch SHALL remain paired and retain its attached model skill metadata. Each admitted attempt SHALL identify the frozen revision and selected original context coordinates. Image recovery SHALL use the selected evidence, with the same budget and coordinates across capability and overload retries. Local budget rejection SHALL record a failed Sideband with the estimate and limit before dispatching the oversized attempt.
+
+#### Scenario: Side question follows oversized old evidence
+- **WHEN** the complete history exceeds the route window while the mandatory input and recent evidence fit
+- **THEN** the side question uses the fitting recent evidence and complete question without changing foreground history; a retry uses the original coordinates.
+
+#### Scenario: An oversized side question cannot be admitted
+- **WHEN** the mandatory input or a recovered representation of the selected evidence exceeds the frozen limit
+- **THEN** the opened Sideband ends as Failed without dispatching the oversized attempt.

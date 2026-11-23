@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use agent_client_protocol::schema::v1::McpServer;
 use serde::Serialize;
 use tools::types::config_source::ConfigSource;
 
@@ -211,20 +213,25 @@ fn check_command_exists(command: &str) -> Check {
 }
 
 async fn check_server_start(
-    acp_server: agent_client_protocol::schema::v1::McpServer,
+    acp_server: McpServer,
     cwd: &Path,
 ) -> Result<(mcp_servers::McpClient, Check), Check> {
-    let start = std::time::Instant::now();
+    let (stage, success) = match &acp_server {
+        McpServer::Http(_) | McpServer::Sse(_) => ("HTTP client creation", "HTTP client created"),
+        McpServer::Stdio(_) => ("stdio process spawn", "stdio process spawned"),
+        _ => ("transport setup", "transport ready"),
+    };
+    let start = Instant::now();
     let ctx = mcp_servers::McpSpawnCtx::session_less();
     match mcp_servers::start_mcp_server(acp_server, Some(cwd), None, &ctx).await {
         Ok(client) => {
             let elapsed = start.elapsed();
             Ok((
                 client,
-                Check::pass("server started", format!("{:.1}s", elapsed.as_secs_f64())),
+                Check::pass(success, format!("{:.1}s", elapsed.as_secs_f64())),
             ))
         }
-        Err(e) => Err(format_mcp_error("server failed to start", &e)),
+        Err(e) => Err(format_mcp_error(stage, &e)),
     }
 }
 
@@ -237,47 +244,65 @@ async fn check_handshake(
                 .peer_info()
                 .map(|info| format!("protocol {}", info.protocol_version))
                 .unwrap_or_else(|| "protocol unknown".to_string());
-            Ok((service, Check::pass("handshake OK", protocol)))
+            Ok((service, Check::pass("MCP handshake OK", protocol)))
         }
-        Err(e) => Err(format_mcp_error("handshake failed", &e)),
+        Err(e) => Err(format_mcp_error("MCP handshake", &e)),
     }
 }
 
-async fn check_tools_list(service: &mcp_servers::McpService) -> Check {
-    match ::mcp::servers::list_all_tools(service.peer()).await {
-        Ok(tools) => {
+async fn check_tools_list(
+    service: &mcp_servers::McpService,
+    initialization_start: Instant,
+    budget: Duration,
+) -> Check {
+    let remaining = budget.saturating_sub(initialization_start.elapsed());
+    match tokio::time::timeout(remaining, ::mcp::servers::list_all_tools(service.peer())).await {
+        Ok(Ok(tools)) if tools.is_empty() => Check::fail(
+            "MCP tool discovery failed",
+            "tools/list returned an empty catalog",
+            "check server config",
+        ),
+        Ok(Ok(tools)) => {
             let count = tools.len();
-            if count == 0 {
-                Check::fail(
-                    "0 tools discovered",
-                    "server returned an empty tool list",
-                    "check server config",
-                )
-            } else {
-                Check::pass(format!("{} tools discovered", count), "")
-            }
+            let unit = if count == 1 { "tool" } else { "tools" };
+            Check::pass(
+                "MCP tool discovery OK",
+                format!("tools/list returned {count} {unit}"),
+            )
         }
-        Err(e) => Check::fail("tools/list failed", e.to_string(), "check server logs"),
+        Ok(Err(e)) => format_mcp_error("MCP tool discovery", &e),
+        Err(_) => Check::fail(
+            "MCP tool discovery timed out",
+            format!(
+                "{}s initialization budget exhausted during tools/list",
+                budget.as_secs()
+            ),
+            "check server logs for the pending tools/list request",
+        ),
     }
 }
 
-fn format_mcp_error(label: &str, err: &mcp_servers::McpError) -> Check {
+fn format_mcp_error(stage: &str, err: &mcp_servers::McpError) -> Check {
     use mcp_servers::McpError;
+    let failed = format!("{stage} failed");
     match err {
         McpError::Timeout { timeout_secs, .. } => Check::fail(
-            "server timed out",
-            format!("no response within {}s", timeout_secs),
-            "try increasing startup_timeout_sec in config.toml",
+            format!("{stage} timed out"),
+            format!("did not complete within {timeout_secs}s"),
+            "check connectivity, server logs, and startup_timeout_sec in config.toml",
         ),
-        McpError::SpawnFailed { source, .. } => Check::fail(
-            "spawn failed",
-            source.to_string(),
-            "check command and permissions",
+        McpError::ServiceError(::mcp::rmcp::ServiceError::Timeout { timeout }) => Check::fail(
+            format!("{stage} timed out"),
+            format!("request deadline of {timeout:?} elapsed"),
+            "check server logs",
         ),
-        McpError::HandshakeFailed { source, .. } => {
-            Check::fail("handshake failed", source.to_string(), "check server logs")
+        McpError::SpawnFailed { source, .. } => {
+            Check::fail(failed, source.to_string(), "check command and permissions")
         }
-        _ => Check::fail(label, err.to_string(), "check server logs"),
+        McpError::HandshakeFailed { source, .. } => {
+            Check::fail(failed, source.to_string(), "check server logs")
+        }
+        _ => Check::fail(failed, err.to_string(), "check server logs"),
     }
 }
 
@@ -325,13 +350,15 @@ async fn check_server(
         }
         Ok((client, check)) => {
             checks.push(check);
+            let budget = mcp_servers::initialization_budget(client.startup_timeout_sec());
+            let initialization_start = Instant::now();
             match check_handshake(&client).await {
                 Err(check) => {
                     checks.push(check);
                 }
                 Ok((service, check)) => {
                     checks.push(check);
-                    checks.push(check_tools_list(&service).await);
+                    checks.push(check_tools_list(&service, initialization_start, budget).await);
                 }
             }
             // Client drops here, killing child process via kill_on_drop.
@@ -518,8 +545,9 @@ mod tests {
             server: "test".into(),
             timeout_secs: 5,
         };
-        let check = format_mcp_error("ignored", &err);
-        assert_eq!(check.label, "server timed out");
+        let check = format_mcp_error("MCP handshake", &err);
+        assert_eq!(check.label, "MCP handshake timed out");
+        assert_eq!(check.detail.as_deref(), Some("did not complete within 5s"));
         assert!(
             check
                 .hint
@@ -531,8 +559,8 @@ mod tests {
 
     #[test]
     fn non_timeout_uses_caller_label() {
-        let check = format_mcp_error("handshake failed", &McpError::ClientError("boom".into()));
-        assert_eq!(check.label, "handshake failed");
+        let check = format_mcp_error("MCP handshake", &McpError::ClientError("boom".into()));
+        assert_eq!(check.label, "MCP handshake failed");
         assert_eq!(check.detail.as_deref(), Some("MCP client error: boom"));
     }
 
@@ -542,8 +570,18 @@ mod tests {
             server: "test".into(),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory"),
         };
-        let check = format_mcp_error("ignored", &err);
-        assert_eq!(check.label, "spawn failed");
+        let check = format_mcp_error("stdio process spawn", &err);
+        assert_eq!(check.label, "stdio process spawn failed");
         assert!(check.detail.as_deref().unwrap().contains("No such file"));
+    }
+
+    #[test]
+    fn request_timeout_preserves_stage_and_sdk_deadline() {
+        let error = ::mcp::rmcp::ServiceError::Timeout {
+            timeout: Duration::from_millis(1500),
+        };
+        let check = format_mcp_error("MCP tool discovery", &McpError::ServiceError(error));
+        assert_eq!(check.label, "MCP tool discovery timed out");
+        assert!(check.detail.as_deref().unwrap().contains("1.5s"));
     }
 }

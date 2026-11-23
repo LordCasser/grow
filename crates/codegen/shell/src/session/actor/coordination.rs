@@ -349,69 +349,64 @@ impl SessionActor {
                 );
             }
         };
-        let frozen = (
-            &materialized.surface[..],
-            &materialized.surface_ids[..],
-            materialized.surface_revision,
-        );
-        let mut items = sampling_types::project_portable_history(&materialized.surface);
-        let prepared_images = tokio::select! {
-            biased;
-            _ = inquiry.cancellation.cancelled() => return inquiry.cancellation.outcome(&inquiry.inquiry_id),
-            result = self.prepare_sideband_images(&mut items, frozen, &image_key) => result,
-        };
-        if let Err(error) = prepared_images {
-            return failed(inquiry, error);
-        }
         let prompt = crate::coordination::inquiry_prompt(
             &inquiry.source_session_id,
             &inquiry.source_cwd,
             &inquiry.question,
         );
-        items.push(ConversationItem::user(prompt.clone()));
-        let mut request = ConversationRequest {
-            items,
-            model: Some(model.clone()),
-            temperature: None,
-            ..Default::default()
+        let preparation_failure = |error: SidebandRunError| {
+            if inquiry.cancellation.is_cancelled() {
+                inquiry.cancellation.outcome(&inquiry.inquiry_id)
+            } else if matches!(error, SidebandRunError::Cancelled) {
+                crate::coordination::InquiryOutcome::terminal(
+                    &inquiry.inquiry_id,
+                    crate::coordination::InquiryStatus::Cancelled,
+                    "target session closed during coordination inquiry",
+                )
+            } else {
+                failed(inquiry, error.to_string())
+            }
         };
-        debug_assert!(request.tools.is_empty());
-        debug_assert!(request.tool_choice.is_none());
-        let mut sideband = match self
-            .begin_sideband(
-                chat_state::SidebandPurpose::InfoRequest,
+        let backend = sampling_client.api_backend();
+        let (mut sideband, mut question) = match self
+            .prepare_frozen_question(
+                &materialized,
                 prompt,
-                SidebandSource::Frozen(vec![materialized.input_ref.clone()]),
-                {
-                    let mut policy = chat_state::SidebandBudgetPolicy::for_request(&request, 2);
-                    policy.max_input_tokens_per_attempt = context_window;
-                    policy
-                },
+                chat_state::SidebandPurpose::InfoRequest,
                 chat_state::SidebandRoute {
                     model,
-                    backend: sampling_client.api_backend(),
+                    backend: backend.clone(),
                 },
-                None,
+                context_window,
+                2,
             )
             .await
         {
-            Ok(sideband) => sideband,
-            Err(error) => return failed(inquiry, format!("failed to start sideband: {error}")),
+            Ok(prepared) => prepared,
+            Err(error) => return preparation_failure(error),
         };
-        if let Err(error) = sideband
-            .attempt_all_sources(&request, sampling_client.api_backend(), None)
+        let images = tokio::select! {
+            biased;
+            _ = inquiry.cancellation.cancelled() => return inquiry.cancellation.outcome(&inquiry.inquiry_id),
+            result = question.prepare_images(self, &mut sideband, materialized.surface_revision, &image_key) => result,
+        };
+        if let Err(error) = images {
+            return preparation_failure(error);
+        }
+        if let Err(error) = question
+            .attempt(&mut sideband, &materialized, backend, None)
             .await
         {
-            return failed(
-                inquiry,
-                format!("failed to persist sideband attempt: {error}"),
-            );
+            return preparation_failure(error);
         }
         let provider = self.collect_sideband_with_image_recovery(
             &mut sideband,
             &sampling_client,
-            &mut request,
-            frozen,
+            &mut question.request,
+            super::sideband::SidebandImageSources::Selection(
+                &question.context_ids,
+                materialized.surface_revision,
+            ),
             &image_key,
         );
         let response = tokio::select! {
@@ -995,6 +990,7 @@ fn failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod budget_tests;
     mod identity_tests;
 
     struct JsonlTimelinePersistence {

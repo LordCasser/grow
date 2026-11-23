@@ -1159,8 +1159,7 @@ fn pending_model_skill_compaction_scenario(sufficient_prefix: bool) {
                 assert!(!body_occurs(summary_input, &expected_body));
                 assert!(!body_occurs(summary_input, "compact-pending-skill"));
             } else {
-                let error = compact.expect_err("no adequate safe source exists");
-                assert!(format!("{error:?}").contains("no closed Surface range"), "{error:?}");
+                compact.expect("the fitting ordinary request may consume the pinned skill");
                 assert_eq!(server.request_bodies().len(), 1, "no summary provider request starts");
             }
             let after = actor.chat_state_handle.materialize_timeline(actor.session_id_string()).await.unwrap();

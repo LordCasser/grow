@@ -879,11 +879,18 @@ async fn reviewed_write_always_approve_keeps_explicit_operator_semantics() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn subagent_hard_forbidden_bash_rejects_before_permission() {
+async fn subagent_hard_forbidden_bash_and_message_reject_before_permission() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (mut actor, _event_rx, log, mut permission_events) =
                 make_subagent_fixture(Some("allow-once"), std::time::Duration::from_secs(60)).await;
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                ToolConfig::for_tool::<BashTool>().with_param("enabled_background", false),
+                ToolConfig::for_tool::<
+                    tools::implementations::grow_build::task::interaction::SendSubagentMessageTool,
+                >(),
+            ])
+            .await;
             let bridge = actor.agent.borrow().tool_bridge().clone();
             actor.subagent_capabilities = Some(
                 crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
@@ -914,6 +921,21 @@ async fn subagent_hard_forbidden_bash_rejects_before_permission() {
                     .any(|item| item.text_content().contains("repro-ok")),
                 "a forbidden call must never dispatch"
             );
+            let send = crate::sampling::types::ToolCallResponse {
+                id: "completed-handoff".into(),
+                kind: "function".into(),
+                function: crate::sampling::types::ToolCallFunction::new(
+                    "send_subagent_message",
+                    r#"{"subagent_id":"child","message":"Finished."}"#,
+                ),
+            };
+            actor.execute_tool_calls(vec![send]).await.unwrap();
+            assert!(actor.chat_state_handle.get_conversation().await.iter().any(
+                |item| matches!(item, sampling_types::ConversationItem::ToolResult(result)
+                    if result.tool_call_id == "completed-handoff"
+                    && result.content.contains("final response")
+                    && result.content.contains("ask_parent"))
+            ));
             tokio::task::yield_now().await;
             assert!(
                 log.lock()

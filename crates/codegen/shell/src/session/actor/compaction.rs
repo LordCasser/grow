@@ -453,6 +453,7 @@ fn model_switch_compaction_trigger(
 /// window. The overflow branch matches it and fails the turn instead of
 /// resampling in a loop (fail-safe).
 pub(crate) const COMPACT_CONVERGED_OVER_WINDOW: &str = "compact_converged_over_window";
+const COMPACT_NO_RANGE: &str = "no_eligible_range";
 const COMPACT_IMAGE_INPUT_UNSUPPORTED: &str = "compact_image_input_unsupported";
 
 /// Whether `err` carries the [`COMPACT_CONVERGED_OVER_WINDOW`] marker.
@@ -1241,9 +1242,10 @@ impl SessionActor {
             MIN_COMPACTION_SOURCE_TOKENS,
         )
         .ok_or_else(|| {
-            acp::Error::internal_error().data(
-                "Compaction skipped: no closed Surface range is large enough to summarize while preserving the recent verbatim tail",
-            )
+            acp::Error::internal_error().data(serde_json::json!({
+                "compact_error": COMPACT_NO_RANGE,
+                "message": "Compaction skipped: no closed Surface range is large enough to summarize while preserving the recent verbatim tail",
+            }))
         })?;
         let context_recall_tool_name = {
             let agent_ref = self.agent.borrow();
@@ -2159,54 +2161,18 @@ impl SessionActor {
         reason: &str,
     ) -> Result<(), acp::Error> {
         self.compaction.cancel.request_background_cancel();
-        let pending = {
-            let mut slot = self.compaction.background.borrow_mut();
-            if let Some(pending) = slot.as_ref() {
-                // Before promotion no CompactCancelGate scope exists. Signal
-                // the generation owner itself; keep its slot until it settles.
+        let ready = self
+            .compaction
+            .background
+            .borrow()
+            .as_ref()
+            .is_some_and(|pending| {
                 pending.cancel.cancel();
-            }
-            if slot
-                .as_ref()
-                .is_some_and(|pending| pending.worker.is_finished())
-            {
-                slot.take()
-            } else {
-                None
-            }
-        };
-        if let Some(mut pending) = pending {
-            let joined = (&mut pending.worker).await;
-            let failure = match joined {
-                Ok(Err(error))
-                    if crate::session::commands::is_fatal_turn_boundary_error(&error) =>
-                {
-                    Some(error)
-                }
-                Err(error) => Some(crate::session::commands::fatal_turn_boundary_error(
-                    "background compaction worker",
-                    error.to_string(),
-                )),
-                _ => None,
-            };
-            self.chat_state_handle
-                .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
-                    chat_state::CompactionEvent::Failed {
-                        id: pending.id.clone(),
-                        duration_ms: pending.started.elapsed().as_millis() as u64,
-                        error: reason.to_owned(),
-                    },
-                ))
-                .await
-                .map_err(|error| {
-                    crate::session::commands::fatal_turn_boundary_error(
-                        "background compaction cancellation",
-                        error.to_string(),
-                    )
-                })?;
-            if let Some(error) = failure {
-                return Err(error);
-            }
+                pending.worker.is_finished()
+            });
+        if ready {
+            self.cancel_background_compaction_before(reason, None)
+                .await?;
         }
         Ok(())
     }
@@ -2276,7 +2242,7 @@ impl SessionActor {
                 "publication attempted inside an active Step",
             ));
         }
-        let committed = self.finish_background_compaction(false).await?;
+        let committed = self.finish_background_compaction(None).await?;
         if self.compaction.background.borrow().is_some()
             || self.compaction.pending_async_notice.get().is_some()
             || self.compaction.background_failed.get()
@@ -2465,11 +2431,14 @@ impl SessionActor {
             && compaction_range_is_current(&materialized.surface_ids, &pending.target))
     }
 
-    /// `wait` promotes the existing job; it never starts another provider call.
+    /// At a nonblocking boundary, true means a summary was published. A
+    /// foreground caller instead waits until the existing job handles its
+    /// trigger or retires durably so a new transaction can take over.
     async fn finish_background_compaction(
         self: &Arc<Self>,
-        wait: bool,
+        foreground: Option<&AutoCompactTriggerInfo>,
     ) -> Result<bool, acp::Error> {
+        let wait = foreground.is_some();
         let take = self
             .compaction
             .background
@@ -2508,7 +2477,9 @@ impl SessionActor {
             .await?
         {
             pending.restore();
-            self.cancel_background_compaction("compaction_source_invalidated")
+            // At a polling boundary the worker is already finished. During
+            // foreground takeover the root inbox is free to settle its usage.
+            self.cancel_background_compaction_before("compaction_source_invalidated", None)
                 .await?;
             return Ok(false);
         }
@@ -2663,31 +2634,20 @@ impl SessionActor {
                     tracing::warn!(%error, generation_failed, "background compaction discarded; synchronous recovery remains available");
                     return Ok(false);
                 }
-                if wait && !cancel.is_cancelled() {
-                    let context_window = self
-                        .chat_state_handle
-                        .get_sampling_config()
+                if let Some(trigger) = foreground {
+                    return self
+                        .finish_auto_compaction_error(
+                            error,
+                            trigger,
+                            committed,
+                            tokens_before,
+                            foreground_started.elapsed().as_millis() as i64,
+                            cancel.is_cancelled(),
+                        )
                         .await
-                        .map(|config| config.context_window.get())
-                        .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-                    self.suppress_auto_compaction(
-                        Self::classify_suppress_reason(&Self::acp_error_message(&error)),
-                        tokens_before,
-                        context_window,
-                    )
-                    .await;
+                        .map(|()| true);
                 }
-                if wait {
-                    self.publish_foreground_compaction_terminal(
-                        &Err(error.clone()),
-                        committed,
-                        false,
-                        tokens_before,
-                        foreground_started.elapsed().as_millis() as i64,
-                        cancel.is_cancelled(),
-                    )
-                    .await;
-                } else if committed {
+                if committed {
                     self.compaction.pending_async_notice.set(Some(
                         crate::session::compaction_config::PendingAsyncCompactionNotice {
                             tokens_before,
@@ -3133,7 +3093,10 @@ impl SessionActor {
             tracing::debug!("auto compact skipped: another compaction owns the lease");
             return Ok(());
         };
-        if self.finish_background_compaction(true).await? {
+        if self
+            .finish_background_compaction(Some(&trigger_info))
+            .await?
+        {
             return self
                 .ensure_model_context_fits(trigger_info.max_output_tokens)
                 .await;
@@ -3244,61 +3207,88 @@ impl SessionActor {
                 self.ensure_model_context_fits(trigger_info.max_output_tokens)
                     .await
             }
-            Err(mut e) => {
+            Err(error) => {
                 let span = tracing::Span::current();
                 span.record("success", false);
-                span.record("error", e.to_string().as_str());
-                let cancelled = self.compaction.cancel.is_cancelled()
-                    || e.data.as_ref().and_then(|d| d.as_str()).is_some_and(|s| {
-                        s.contains(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)
-                    });
-                // Some failures happen before the summarizer/provider path
-                // classifies them (for example, no eligible closed Surface
-                // range). Route every auto-compaction failure through the
-                // same policy so one impossible plan cannot retry at every
-                // step of a long Goal turn.
-                if !cancelled
-                    && self
-                        .compaction
-                        .auto_compact_suppressed
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        == SUPPRESS_NONE
-                {
-                    let reason = Self::classify_suppress_reason(&Self::acp_error_message(&e));
-                    self.suppress_auto_compaction(
-                        reason,
-                        trigger_info.tokens_used,
-                        trigger_info.context_window,
-                    )
-                    .await;
-                }
-                self.publish_foreground_compaction_terminal(
-                    &Err(e.clone()),
+                span.record("error", error.to_string().as_str());
+                self.finish_auto_compaction_error(
+                    error,
+                    &trigger_info,
                     committed,
-                    false,
                     trigger_info.tokens_used,
                     elapsed_ms,
-                    cancelled,
+                    self.compaction.cancel.is_cancelled(),
                 )
-                .await;
-                if !cancelled
-                    && trigger_info.recovering_overflow()
-                    && !crate::session::commands::is_fatal_turn_boundary_error(&e)
-                    && !Self::is_auth_compact_error(&e)
-                {
-                    // Preserve the summary failure (for example, no eligible
-                    // range) while carrying the primary request's capacity
-                    // evidence to the durable Turn terminal.
-                    let mut data = match e.data.take() {
-                        Some(value @ serde_json::Value::Object(_)) => value,
-                        other => serde_json::json!({ "message": other }),
-                    };
-                    data["context_recovery_required"] = serde_json::Value::Bool(true);
-                    e.data = Some(data);
-                }
-                Err(e)
+                .await
             }
         }
+    }
+
+    async fn finish_auto_compaction_error(
+        &self,
+        mut error: acp::Error,
+        trigger: &AutoCompactTriggerInfo,
+        committed: bool,
+        tokens_before: u64,
+        elapsed_ms: i64,
+        cancelled: bool,
+    ) -> Result<(), acp::Error> {
+        use crate::extensions::notification::{AutoCompactCancelReason, SessionUpdate};
+        let cancelled = cancelled
+            || error.data.as_ref().and_then(|data| data.as_str())
+                == Some(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG);
+        if !cancelled {
+            self.suppress_auto_compaction(
+                Self::classify_suppress_reason(&Self::acp_error_message(&error)),
+                tokens_before,
+                trigger.context_window,
+            )
+            .await;
+        }
+        let no_range = error
+            .data
+            .as_ref()
+            .and_then(|data| data["compact_error"].as_str())
+            == Some(COMPACT_NO_RANGE);
+        if no_range && !committed && !cancelled && !trigger.recovering_overflow() {
+            // The planner did no work. The next Step still rebuilds the
+            // request and checks its hard window before provider dispatch.
+            match self
+                .ensure_model_context_fits(trigger.max_output_tokens)
+                .await
+            {
+                Ok(()) => {
+                    self.send_grow_notification(SessionUpdate::AutoCompactCancelled {
+                        reason: AutoCompactCancelReason::NoEligibleRange,
+                    })
+                    .await;
+                    return Ok(());
+                }
+                Err(admission_error) => error = admission_error,
+            }
+        }
+        self.publish_foreground_compaction_terminal(
+            &Err(error.clone()),
+            committed,
+            false,
+            tokens_before,
+            elapsed_ms,
+            cancelled,
+        )
+        .await;
+        if !cancelled
+            && trigger.recovering_overflow()
+            && !crate::session::commands::is_fatal_turn_boundary_error(&error)
+            && !Self::is_auth_compact_error(&error)
+        {
+            let mut data = match error.data.take() {
+                Some(value @ serde_json::Value::Object(_)) => value,
+                other => serde_json::json!({ "message": other }),
+            };
+            data["context_recovery_required"] = serde_json::Value::Bool(true);
+            error.data = Some(data);
+        }
+        Err(error)
     }
 }
 
@@ -3883,14 +3873,14 @@ mod context_recall_tests {
                     tokens_used: 90_000,
                     context_window: 100_000,
                     percentage: 90,
-                    source: "test",
+                    source: "context_window_exceeded",
                     max_output_tokens: None,
                 };
 
                 let error = actor
                     .run_compact_only(trigger)
                     .await
-                    .expect_err("a Surface without a closed prompt range cannot compact");
+                    .expect_err("a confirmed provider overflow requires an eligible range");
                 assert!(
                     SessionActor::acp_error_message(&error).contains("no closed Surface range"),
                     "the fixture must exercise the pre-provider planner failure"

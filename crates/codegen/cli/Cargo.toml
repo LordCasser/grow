@@ -72,6 +72,8 @@ tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats", "u
 tikv-jemallocator = { workspace = true, optional = true, features = ["unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
+axum = { workspace = true }
+test-support = { workspace = true }
 pager-pty-harness = { path = "../pager-pty-harness" }
 tempfile = { workspace = true }
 serial_test = { workspace = true }

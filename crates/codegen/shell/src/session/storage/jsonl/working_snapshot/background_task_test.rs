@@ -434,7 +434,7 @@ async fn background_task_history_rebuilds_an_outdated_derived_schema_without_rew
         .await
         .unwrap();
     let index = loaded.history.indexed.as_ref().unwrap();
-    assert_eq!(index.manifest.version, 52);
+    assert_eq!(index.manifest.version, VERSION);
     assert_ne!(index.manifest.generation, generation);
     assert_eq!(
         task_facts(&index.background_task_history().unwrap()),

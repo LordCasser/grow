@@ -81,7 +81,9 @@ enum AcpLine {
     AutoCompactFailed {
         error: String,
     },
-    AutoCompactCancelled,
+    AutoCompactCancelled {
+        reason: shell::extensions::notification::AutoCompactCancelReason,
+    },
     ImageCompressed {
         message: String,
     },
@@ -198,7 +200,7 @@ fn acp_lifecycle_line(l: Lifecycle) -> AcpLine {
             AcpLine::AutoCompactCompleted { async_compact }
         }
         Lifecycle::CompactFailed { error } => AcpLine::AutoCompactFailed { error },
-        Lifecycle::CompactCancelled => AcpLine::AutoCompactCancelled,
+        Lifecycle::CompactCancelled(reason) => AcpLine::AutoCompactCancelled { reason },
         Lifecycle::ImageCompressed { message } => AcpLine::ImageCompressed { message },
     }
 }

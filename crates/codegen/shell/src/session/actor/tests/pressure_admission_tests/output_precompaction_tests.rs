@@ -309,3 +309,44 @@ fn auth_suppression_blocks_automatic_recovery_for_reserved_output_pressure() {
         }));
     });
 }
+
+#[test]
+fn fitting_request_without_a_preventive_summary_range_reaches_provider_once() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", messages_turn("foreground answer"));
+            let (actor, mut notifications) =
+                actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000).await;
+            actor.compaction.threshold_percent.set(80);
+            actor.compaction.pre_prune.set(false);
+            set_output_limit(&actor, 5_000).await;
+            actor
+                .chat_state_handle
+                .record_provider_context_anchor(85_000);
+            let turn = run_user_turn(&actor, "preventive-no-range").await.unwrap();
+            assert_eq!(turn.stop_reason, acp::StopReason::EndTurn);
+            assert_eq!(server.messages_request_count(), 1);
+            let body = &server.request_bodies()[0];
+            assert_eq!(body["max_tokens"], 5_000);
+            let mut updates = Vec::new();
+            while let Ok(msg) = notifications.try_recv() {
+                if let Some((kind, params)) = session_update(&msg)
+                    && kind.starts_with("auto_compact_")
+                {
+                    updates.push((kind, params["update"]["reason"].clone()));
+                }
+            }
+            assert_eq!(updates.len(), 2, "{updates:?}");
+            assert_eq!(updates[0].0, "auto_compact_started");
+            assert_eq!(
+                updates[1],
+                ("auto_compact_cancelled".into(), json!("no_eligible_range"))
+            );
+        }));
+    });
+}

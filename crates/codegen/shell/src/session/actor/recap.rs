@@ -52,8 +52,8 @@ impl SessionActor {
     /// parent session's committed context.
     ///
     /// Approach:
-    /// - Keeps the parent's system prompt (conversation[0]) intact
-    /// - Preserves completed tool exchanges and visible assistant text
+    /// - Keeps the parent's system messages and the wrapped question intact
+    /// - Fits recent history and complete tool exchanges within the prepared context window
     /// - Omits reasoning and unanswered calls through portable history projection
     /// - Wraps the question in a `<system-reminder>` block in a user message
     /// - Single turn, no tool definitions or execution
@@ -87,15 +87,6 @@ impl SessionActor {
             .freeze_sideband_surface()
             .await
             .map_err(SideQuestionError::Sideband)?;
-        let frozen = (
-            &materialized.surface[..],
-            &materialized.surface_ids[..],
-            materialized.surface_revision,
-        );
-        let mut items = sampling_types::project_portable_history(&materialized.surface);
-        self.prepare_sideband_images(&mut items, frozen, &image_key)
-            .await
-            .map_err(SideQuestionError::Sideband)?;
 
         // Wrap the question in a <system-reminder> user message.
         let tag = self.reminder_wrapper_tag();
@@ -116,39 +107,27 @@ impl SessionActor {
              Simply answer the question with the information you have.</{tag}>\n\n\
              {question}"
         );
-        items.push(ConversationItem::user(wrapped_question.clone()));
-
-        // Don't set temperature explicitly — cli-chat-proxy may inject
-        // `thinking` config via request_defaults for thinking-enabled models,
-        // Anthropic requires temperature == 1 when thinking is enabled.
-        // Leaving it None lets the provider defaults apply correctly.
-        //
-        // Built once; each attempt clones it and stamps a fresh req_id (the
-        // per-attempt clone is the cost of the owned-request API — retries
-        // are rare, so the success path pays exactly one clone).
-        let mut base_request = ConversationRequest {
-            items,
-            model: Some(model.clone()),
-            temperature: None,
-            ..Default::default()
-        };
-
-        let mut sideband = self
-            .begin_sideband(
-                chat_state::SidebandPurpose::SideQuestion,
+        let (mut sideband, mut frozen_question) = self
+            .prepare_frozen_question(
+                &materialized,
                 wrapped_question,
-                SidebandSource::Frozen(vec![materialized.input_ref.clone()]),
-                {
-                    let mut policy =
-                        chat_state::SidebandBudgetPolicy::for_request(&base_request, 4);
-                    policy.max_input_tokens_per_attempt = context_window;
-                    policy
-                },
+                chat_state::SidebandPurpose::SideQuestion,
                 chat_state::SidebandRoute {
-                    model: model.clone(),
+                    model,
                     backend: sampling_client.api_backend(),
                 },
-                None,
+                context_window,
+                4,
+            )
+            .await
+            .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
+
+        frozen_question
+            .prepare_images(
+                self,
+                &mut sideband,
+                materialized.surface_revision,
+                &image_key,
             )
             .await
             .map_err(|error| SideQuestionError::Sideband(error.to_string()))?;
@@ -159,9 +138,10 @@ impl SessionActor {
         let mut backoff = side_question_retry_policy().build();
         let mut feedback = None;
         let result = loop {
-            sideband
-                .attempt_all_sources(
-                    &base_request,
+            frozen_question
+                .attempt(
+                    &mut sideband,
+                    &materialized,
                     sampling_client.api_backend(),
                     feedback.take(),
                 )
@@ -171,8 +151,11 @@ impl SessionActor {
                 .collect_sideband_with_image_recovery(
                     &mut sideband,
                     &sampling_client,
-                    &mut base_request,
-                    frozen,
+                    &mut frozen_question.request,
+                    super::sideband::SidebandImageSources::Selection(
+                        &frozen_question.context_ids,
+                        materialized.surface_revision,
+                    ),
                     &image_key,
                 )
                 .await
@@ -256,7 +239,7 @@ impl SessionActor {
         };
         let input_ref = materialized.input_ref.clone();
         let conversation = materialized.surface.clone();
-        let frozen = (
+        let frozen = super::sideband::SidebandImageSources::Surface(
             &materialized.surface[..],
             &materialized.surface_ids[..],
             materialized.surface_revision,

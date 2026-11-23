@@ -576,7 +576,8 @@ impl SessionActor {
                         "memory flush newest complete turn exceeds its input budget or is absent",
                     )
                 })?;
-            self.prepare_sideband_images(&mut items, (&surface, &surface_ids, surface_revision), &image_key)
+            let frozen = super::sideband::SidebandImageSources::Surface(&surface, &surface_ids, surface_revision);
+            self.prepare_sideband_images(&mut items, frozen, &image_key)
                 .await
                 .map_err(|error| acp::Error::internal_error().data(error))?;
             tracing::info!(
@@ -646,7 +647,7 @@ impl SessionActor {
                     .data("memory was disabled before flush provider admission".to_owned()));
             }
             match self
-                .collect_sideband_with_image_recovery(&mut sideband, &sampling_client, &mut request, (&surface, &surface_ids, surface_revision), &image_key)
+                .collect_sideband_with_image_recovery(&mut sideband, &sampling_client, &mut request, frozen, &image_key)
                 .await
             {
                 Ok(Ok(response)) => {

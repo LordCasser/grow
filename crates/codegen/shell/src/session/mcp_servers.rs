@@ -10,9 +10,15 @@ pub use ::mcp::servers::{
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use ::mcp::servers as inner;
 use acp_transport::protocol as acp;
+
+/// Total budget for the MCP handshake and complete tool catalog.
+pub(crate) fn initialization_budget(startup_timeout_sec: u64) -> Duration {
+    Duration::from_secs(startup_timeout_sec.saturating_mul(2).saturating_add(5))
+}
 
 fn resolve_overrides(
     server_name: &str,

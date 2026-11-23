@@ -69,7 +69,7 @@ pub enum SessionEvent {
         error: String,
     },
     /// Auto-compaction was cancelled (turn was cancelled mid-compact).
-    CompactionCancelled,
+    CompactionCancelled(shell::extensions::notification::AutoCompactCancelReason),
     /// Retry failed — all retries exhausted or a non-retryable error.
     ///
     /// Covers both `RetryState::Exhausted` (tried N times, all failed) and
@@ -174,7 +174,7 @@ impl SessionEvent {
                     format!("Compaction failed: {error}")
                 }
             }
-            SessionEvent::CompactionCancelled => "Compaction cancelled.".to_string(),
+            SessionEvent::CompactionCancelled(reason) => reason.description().to_string(),
             SessionEvent::RetryFailed { error, error_type } => {
                 if error_type.is_some() {
                     format!("Model request failed: {error}")

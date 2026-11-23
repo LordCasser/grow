@@ -2398,6 +2398,8 @@ struct SurfaceSkillSources {
     /// Spliced SkillLoad nodes with a leaf older than their current Surface ID.
     origins: Vec<(SurfaceId, EventSeq)>,
     last_response: Option<EventSeq>,
+    /// Evidence for verifying settlements already committed with lost origins.
+    last_settlement: Option<EventSeq>,
 }
 
 impl SurfaceSkillSources {
@@ -2421,6 +2423,9 @@ impl SurfaceSkillSources {
         if replaced.is_empty() {
             return;
         }
+        if message.cause == MessageCause::SkillLoadSettlement {
+            self.last_settlement = Some(seq);
+        }
         let mut carried = Vec::new();
         match message.cause {
             MessageCause::ToolResultPrune => {
@@ -2438,7 +2443,7 @@ impl SurfaceSkillSources {
                     }
                 }
             }
-            MessageCause::IntegrityRepair
+            MessageCause::IntegrityRepair | MessageCause::SkillLoadSettlement
                 if message
                     .items
                     .iter()
@@ -2466,9 +2471,10 @@ impl SurfaceSkillSources {
                     }
                 }
             }
-            MessageCause::ContextRebuild | MessageCause::Rewind => self.last_response = None,
-            // A settlement removes the previous SkillLoad leaves. Any
-            // remaining SkillLoad uses its replacement coordinate.
+            MessageCause::ContextRebuild | MessageCause::Rewind => {
+                self.last_response = None;
+                self.last_settlement = None;
+            }
             _ => {}
         }
         let shadowed = &ids[replaced];
@@ -5541,7 +5547,7 @@ impl Timeline {
     /// entire fold; unlike live accept, no prior state needs to be preserved.
     fn accept_replayed(&mut self, event: TimelineEvent) -> Result<(), TimelineError> {
         self.validate_header(&event)?;
-        self.validate_content(&event)?;
+        self.validate_content(&event, true)?;
         let active_turn = self.lifecycle.active_turn.is_some();
         let active_step = self.lifecycle.active_step.is_some();
         let archived_settlement = self.archive_already_settled_notification(&event)?;
@@ -5945,24 +5951,24 @@ impl Timeline {
         self.validate_header(event)?;
         match &event.kind {
             TimelineEventKind::Runtime(_) | TimelineEventKind::Observation(_) => {
-                self.validate_content(event)?;
+                self.validate_content(event, false)?;
                 return Ok(None);
             }
             TimelineEventKind::Tool(tool) => {
                 self.lifecycle.validate_tool(tool, event.seq)?;
-                self.validate_content(event)?;
+                self.validate_content(event, false)?;
                 return Ok(None);
             }
             TimelineEventKind::Control(control) => {
                 validate_control_revision(self.lifecycle.control_revision, control.revision)?;
-                self.validate_content(event)?;
+                self.validate_content(event, false)?;
                 return Ok(None);
             }
             _ => {}
         }
         let mut lifecycle = self.lifecycle.clone();
         lifecycle.accept(event)?;
-        self.validate_content(event)?;
+        self.validate_content(event, false)?;
         Ok(Some(lifecycle))
     }
 
@@ -6016,7 +6022,11 @@ impl Timeline {
         Ok(())
     }
 
-    fn validate_content(&self, event: &TimelineEvent) -> Result<(), TimelineError> {
+    fn validate_content(
+        &self,
+        event: &TimelineEvent,
+        replaying: bool,
+    ) -> Result<(), TimelineError> {
         let surface_is_published = self
             .surface_checkpoint_cut
             .is_some_and(|cut| event.seq < cut);
@@ -6323,7 +6333,7 @@ impl Timeline {
             {
                 return Err(TimelineError::ContextRebuildAfterTurn);
             }
-            self.validate_messages(messages, event.seq)?;
+            self.validate_messages(messages, event.seq, replaying)?;
         }
         if let TimelineEventKind::Notification(notification) = &event.kind {
             // The published prefix was validated with the complete inbox. A
@@ -6895,6 +6905,7 @@ impl Timeline {
         &self,
         messages: &MessageEvent,
         seq: EventSeq,
+        replaying: bool,
     ) -> Result<(), TimelineError> {
         let _ = u32::try_from(messages.items.len()).map_err(|_| TimelineError::TooManyItems)?;
         if messages.cause == MessageCause::SkillLoadModel
@@ -7079,7 +7090,12 @@ impl Timeline {
                         validate_tool_result_prune(replaced, messages)?;
                     }
                     MessageCause::SkillLoadSettlement
-                        if replaces_all && self.valid_skill_load_settlement(&messages.items) => {}
+                        if replaces_all
+                            && (self.valid_skill_load_settlement(&messages.items)
+                                || (replaying
+                                    && self.valid_committed_skill_load_settlement(
+                                        &messages.items,
+                                    ))) => {}
                     MessageCause::ContextRebuild if replaces_all => {}
                     MessageCause::IntegrityRepair
                         if replaces_all
@@ -7249,6 +7265,7 @@ impl Timeline {
         SurfaceSkillSources {
             origins,
             last_response,
+            last_settlement: fold.last_skill_settlement,
         }
     }
 
@@ -7345,8 +7362,12 @@ impl Timeline {
         if indices.is_empty() {
             return None;
         }
+        Some(self.skill_load_surface_settling(&indices))
+    }
+
+    fn skill_load_surface_settling(&self, indices: &BTreeSet<usize>) -> Vec<ConversationItem> {
         let mut replacement = self.surface.clone();
-        for index in &indices {
+        for index in indices {
             let ConversationItem::SkillLoad(skill) = &self.surface[*index] else {
                 continue;
             };
@@ -7367,7 +7388,7 @@ impl Timeline {
             .enumerate()
             .filter_map(|(index, item)| (!indices.contains(&index)).then_some(item))
             .collect();
-        Some(replacement)
+        replacement
     }
 
     fn valid_skill_load_settlement(&self, replacement: &[ConversationItem]) -> bool {
@@ -7378,6 +7399,39 @@ impl Timeline {
                     .zip(replacement)
                     .all(|(left, right)| conversation_items_match(left, right))
         })
+    }
+
+    fn valid_committed_skill_load_settlement(&self, replacement: &[ConversationItem]) -> bool {
+        let sources = if self.has_surface_checkpoint() {
+            &self.published_skills
+        } else {
+            &self.branch_skill_sources()
+        };
+        let (Some(response), Some(settlement)) = (sources.last_response, sources.last_settlement)
+        else {
+            return false;
+        };
+        if settlement <= response {
+            return false;
+        }
+        let indices = self
+            .surface
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                matches!(item, ConversationItem::SkillLoad(_)).then_some(index)
+            })
+            .collect::<BTreeSet<_>>();
+        // The former settlement fold relabeled every surviving load after
+        // the last response. A second settlement consequently removed the
+        // whole cohort, including loads the response had already consumed.
+        // Require that earlier settlement evidence and its exact transform;
+        // a repair alone, a subset, or unrelated edits cannot justify replay.
+        indices.iter().any(|index| {
+            sources
+                .origin(self.surface_ids[*index])
+                .is_some_and(|origin| origin <= response)
+        }) && conversation_slices_match(&self.skill_load_surface_settling(&indices), replacement)
     }
 
     fn valid_direct_user_append(&self, items: &[ConversationItem]) -> bool {
@@ -9834,6 +9888,7 @@ struct BranchFold {
     leaf_is_message: BTreeMap<SurfaceId, bool>,
     unloaded: BTreeSet<SurfaceId>,
     admitted_response_events: BTreeSet<EventSeq>,
+    last_skill_settlement: Option<EventSeq>,
 }
 
 fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
@@ -9935,6 +9990,7 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                         rebuild_integrity_branch(&mut fold, event.seq, &messages.items, &replaced);
                     } else if messages.cause == MessageCause::SkillLoadSettlement {
                         rebuild_skill_settlement_branch(&mut fold, &messages.items, &replaced);
+                        fold.last_skill_settlement = Some(event.seq);
                     }
                 }
             },
@@ -10178,6 +10234,7 @@ fn reset_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationIte
 /// identities, but retain that prefix's canonical leaf coordinates and births
 /// so subsequent rewinds can still resolve the original response admissions.
 fn reset_rewind_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationItem]) {
+    fold.last_skill_settlement = None;
     fold.leaf_order.truncate(items.len());
     let retained = fold.leaf_order.iter().copied().collect::<BTreeSet<_>>();
     fold.leaf_values.retain(|id, _| retained.contains(id));
@@ -10281,7 +10338,14 @@ fn rebuild_skill_settlement_branch(
     let settled_skill_ids = previous
         .iter()
         .filter_map(|entry| match &entry.value {
-            ConversationItem::SkillLoad(skill) => Some(skill.call_id.clone()),
+            ConversationItem::SkillLoad(skill)
+                if !replacement.iter().any(|item| {
+                    matches!(item, ConversationItem::SkillLoad(retained)
+                        if retained.call_id == skill.call_id)
+                }) =>
+            {
+                Some(skill.call_id.clone())
+            }
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -20972,6 +21036,233 @@ mod tests {
         );
         assert!(consumed.unconsumed_skill_load_indices().is_empty());
         assert!(consumed.settle_unconsumed_skill_loads().unwrap().is_none());
+    }
+
+    fn mixed_skill_settlement_timeline() -> Timeline {
+        let mut timeline = Timeline::default();
+        let mut fresh = append_unconsumed_model_skill(&mut timeline);
+        fresh.call_id = "fresh-load".into();
+        fresh.input_id = "model:fresh-load".into();
+        record_admitted_response(
+            &mut timeline,
+            89,
+            vec![ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: fresh.call_id.clone().into(),
+                    name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
+                    arguments: serde_json::json!({ "name": fresh.skill_name, "args": fresh.args })
+                        .to_string()
+                        .into(),
+                },
+            ])],
+            0,
+        );
+        timeline
+            .append_many(
+                vec![
+                    ConversationItem::tool_result(
+                        fresh.call_id.clone(),
+                        sampling_types::skill_load_result_content(&fresh),
+                    ),
+                    ConversationItem::SkillLoad(fresh),
+                ],
+                MessageCause::SkillLoadModel,
+            )
+            .unwrap();
+        timeline
+            .replace_all(timeline.surface().to_vec(), MessageCause::IntegrityRepair)
+            .unwrap();
+        timeline
+    }
+
+    fn restore_skill_settlement_checkpoint(timeline: &Timeline) -> Timeline {
+        let mut checkpoint = SurfaceCheckpoint::default();
+        for event in timeline.events() {
+            checkpoint.accept(event, false, false).unwrap();
+        }
+        Timeline::from_working_prefix(
+            Vec::new(),
+            timeline.next_seq(),
+            None,
+            None,
+            None,
+            false,
+            Some(serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn skill_settlement_preserves_consumed_origins_live_replay_and_checkpoint() {
+        for checkpoint_before_settlement in [false, true] {
+            let dense = mixed_skill_settlement_timeline();
+            let mut timeline = if checkpoint_before_settlement {
+                restore_skill_settlement_checkpoint(&dense)
+            } else {
+                dense.clone()
+            };
+            assert_eq!(
+                timeline.unconsumed_skill_load_indices(),
+                BTreeSet::from([5])
+            );
+            let settled = timeline.settle_unconsumed_skill_loads().unwrap().unwrap();
+            assert!(timeline.unconsumed_skill_load_ids().is_empty());
+            assert!(timeline.settle_unconsumed_skill_loads().unwrap().is_none());
+
+            let mut events = dense.events().to_vec();
+            events.push(settled);
+            let replay = Timeline::from_events(events).unwrap();
+            let restored = restore_skill_settlement_checkpoint(&replay);
+            for mut candidate in [timeline, replay, restored] {
+                assert!(candidate.unconsumed_skill_load_ids().is_empty());
+                assert!(candidate.settle_unconsumed_skill_loads().unwrap().is_none());
+                assert_eq!(
+                    candidate
+                        .surface()
+                        .iter()
+                        .filter_map(|item| match item {
+                            ConversationItem::SkillLoad(skill) => Some(skill.call_id.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    vec!["load-call"]
+                );
+                let result = candidate
+                    .surface()
+                    .iter()
+                    .find_map(|item| match item {
+                        ConversationItem::ToolResult(result)
+                            if result.tool_call_id == "load-call" =>
+                        {
+                            Some(result.content.as_ref())
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_ne!(
+                    result,
+                    "Loaded skill content was not consumed before execution ended"
+                );
+                if !candidate.has_surface_checkpoint() {
+                    assert!(candidate.branch_transcript().iter().any(|item| {
+                        matches!(item, ConversationItem::SkillLoad(skill) if skill.call_id == "load-call")
+                    }));
+                }
+                candidate
+                    .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                        mode: crate::CompactionMode::Foreground,
+                        id: "consumed-skills".into(),
+                        source_items: candidate.surface_len(),
+                        prompt_index: 0,
+                    }))
+                    .unwrap();
+                let range = record_compaction_summary(&mut candidate, "consumed-skills");
+                candidate
+                    .replace_compaction_range(range, vec![ConversationItem::user_meta("summary")])
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn committed_skill_settlement_replays_exact_previous_origin_loss_only() {
+        let mut timeline = mixed_skill_settlement_timeline();
+        // IntegrityRepair also replaces Surface IDs after consumption, but
+        // alone provides no evidence for the historical settlement bug.
+        let all_skills = BTreeSet::from([2, 5]);
+        let replacement = timeline.skill_load_surface_settling(&all_skills);
+        let old_event = |timeline: &Timeline, items: Vec<ConversationItem>| TimelineEvent {
+            version: TIMELINE_SCHEMA_VERSION,
+            seq: timeline.next_seq(),
+            at_ms: 1,
+            kind: TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::SkillLoadSettlement,
+                items,
+                surface: SurfaceOp::Replace {
+                    start: timeline.surface_ids()[0],
+                    end: *timeline.surface_ids().last().unwrap(),
+                    shadowed: timeline.surface_ids().to_vec(),
+                },
+                response_admission: None,
+            }),
+        };
+        assert!(matches!(
+            timeline
+                .clone()
+                .with_replayed_suffix(vec![old_event(&timeline, replacement)]),
+            Err(TimelineError::InvalidMessageShape)
+        ));
+
+        timeline.settle_unconsumed_skill_loads().unwrap().unwrap();
+        // Further repairs preserve both original load coordinates and the
+        // prior settlement evidence in dense and checkpoint projections.
+        timeline
+            .replace_all(timeline.surface().to_vec(), MessageCause::IntegrityRepair)
+            .unwrap();
+        let replacement = timeline.skill_load_surface_settling(&BTreeSet::from([2]));
+        let committed = old_event(&timeline, replacement.clone());
+        for mut source in [
+            timeline.clone(),
+            restore_skill_settlement_checkpoint(&timeline),
+        ] {
+            assert!(matches!(
+                source.prepare(committed.kind.clone()),
+                Err(TimelineError::InvalidMessageShape)
+            ));
+            assert!(matches!(
+                source.accept(committed.clone()),
+                Err(TimelineError::InvalidMessageShape)
+            ));
+            let replay = source
+                .clone()
+                .with_replayed_suffix(vec![committed.clone()])
+                .unwrap();
+            assert!(conversation_slices_match(replay.surface(), &replacement));
+            assert!(replay.unconsumed_skill_load_ids().is_empty());
+
+            let mut unrelated_edit = replacement.clone();
+            unrelated_edit.push(ConversationItem::assistant("invented history"));
+            let mut altered_result = replacement.clone();
+            if let ConversationItem::ToolResult(result) = &mut altered_result[1] {
+                result.content = "changed historical result".into();
+            }
+            for invalid in [timeline.surface().to_vec(), unrelated_edit, altered_result] {
+                assert!(matches!(
+                    source
+                        .clone()
+                        .with_replayed_suffix(vec![old_event(&source, invalid)]),
+                    Err(TimelineError::InvalidMessageShape)
+                ));
+            }
+        }
+        let mut events = timeline.events().to_vec();
+        events.push(committed);
+        let replay = Timeline::from_events(events).unwrap();
+        let mut checkpoint = restore_skill_settlement_checkpoint(&replay);
+        assert!(
+            checkpoint
+                .settle_unconsumed_skill_loads()
+                .unwrap()
+                .is_none()
+        );
+        assert!(conversation_slices_match(
+            checkpoint.surface(),
+            &replacement
+        ));
+
+        record_admitted_response(
+            &mut timeline,
+            90,
+            vec![ConversationItem::assistant("already consumed")],
+            0,
+        );
+        let replacement = timeline.skill_load_surface_settling(&BTreeSet::from([2]));
+        assert!(matches!(
+            timeline
+                .clone()
+                .with_replayed_suffix(vec![old_event(&timeline, replacement)]),
+            Err(TimelineError::InvalidMessageShape)
+        ));
     }
 
     #[test]

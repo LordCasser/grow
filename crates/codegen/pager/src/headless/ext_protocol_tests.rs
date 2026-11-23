@@ -136,6 +136,29 @@ fn headless_task_completed_parses_task_id() {
 }
 
 #[test]
+fn headless_compaction_terminal_distinguishes_no_range_from_stop() {
+    for (reason, expected) in [
+        (
+            "no_eligible_range",
+            "Compaction skipped: recent history retained.",
+        ),
+        ("user_cancelled", "Auto-compact cancelled."),
+    ] {
+        let notification = make_ext_notif(
+            "grow/session_notification",
+            serde_json::json!({
+                "sessionUpdate": "auto_compact_cancelled",
+                "reason": reason
+            }),
+        );
+        let ExtEvent::Lifecycle(event) = handle_ext_notification(&notification) else {
+            panic!("missing compaction terminal for {reason}");
+        };
+        assert_eq!(event.plain_message(), expected);
+    }
+}
+
+#[test]
 fn headless_subagent_spawned_and_finished_parse() {
     let spawned = make_ext_notif(
         "grow/session_notification",

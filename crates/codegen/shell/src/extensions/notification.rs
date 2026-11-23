@@ -570,6 +570,16 @@ pub struct HookRunEntryDto {
 #[strum(serialize_all = "snake_case")]
 pub enum AutoCompactCancelReason {
     UserCancelled,
+    NoEligibleRange,
+}
+
+impl AutoCompactCancelReason {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::UserCancelled => "Compaction cancelled.",
+            Self::NoEligibleRange => "Compaction skipped: recent history retained.",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Hash, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

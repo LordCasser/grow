@@ -106,7 +106,7 @@ pub(crate) enum Lifecycle {
     CompactFailed {
         error: String,
     },
-    CompactCancelled,
+    CompactCancelled(shell::extensions::notification::AutoCompactCancelReason),
     ImageCompressed {
         message: String,
     },
@@ -128,7 +128,10 @@ impl Lifecycle {
                 "Auto-compact failed.".to_string()
             }
             Lifecycle::CompactFailed { error } => format!("Auto-compact failed: {error}"),
-            Lifecycle::CompactCancelled => "Auto-compact cancelled.".to_string(),
+            Lifecycle::CompactCancelled(
+                shell::extensions::notification::AutoCompactCancelReason::UserCancelled,
+            ) => "Auto-compact cancelled.".to_string(),
+            Lifecycle::CompactCancelled(reason) => reason.description().to_string(),
             Lifecycle::ImageCompressed { message } => message.clone(),
         }
     }

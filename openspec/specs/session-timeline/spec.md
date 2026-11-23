@@ -2508,3 +2508,10 @@ A working publication SHALL bind the selected transformed Surface, item identiti
 - **THEN** lifetime 按原结算累计，已冻结 Turn 结果保持原值，不伪称此前已包含该消费。
 
 证据入口：`crates/codegen/shell/src/session/history/grow_facts.rs::GrowHistoryFact::TurnCompleted`、`session/storage/jsonl/` 的完成历史索引与原 usage 结算路径。
+
+### Requirement: Context recall verifies the frozen journal frontier on indexed reload
+ContextRecall parent validation SHALL reconstruct the frozen branch at the request's canonical sequence frontier when validated diagnostics are omitted from an indexed parent.
+
+#### Scenario: The journal reader omits diagnostics during index migration
+- **WHEN** the reader has validated a parent journal through the frozen frontier and removes diagnostic observations from its in-memory branch
+- **THEN** recall validates the same revision, live coordinates and unloaded transcript leaves as dense replay. Unavailable frontiers, invalid coordinates and mismatched manifests still fail validation.

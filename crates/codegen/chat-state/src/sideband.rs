@@ -535,22 +535,31 @@ impl SidebandTimeline {
             .map(|source_ref| source_ref.last_seq)
             .max()
             .ok_or(SidebandError::ParentMaterializationMismatch)?;
-        let high_water = usize::try_from(high_water)
-            .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
         let source = parent
             .canonical_branch()
             .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
+        if high_water >= source.next_seq().get() {
+            return Err(SidebandError::ParentMaterializationMismatch);
+        }
         let prefix = source
             .events()
             .iter()
-            .take_while(|event| event.seq.get() <= high_water as u64)
+            .take_while(|event| event.seq.get() <= high_water)
             .cloned()
             .collect::<Vec<_>>();
-        if prefix.len() != high_water.saturating_add(1) {
-            return Err(SidebandError::ParentMaterializationMismatch);
+        let frozen = if source.has_archived_events() {
+            // The parent already validated these omitted diagnostic events.
+            // Its canonical frontier, not retained vector length, bounds the
+            // frozen source. Dense callers retain strict contiguous replay.
+            crate::Timeline::from_indexed_prefix(
+                prefix,
+                crate::EventSeq::new(high_water + 1),
+                source.first_event_at_ms(),
+            )
+        } else {
+            crate::Timeline::from_events(prefix)
         }
-        let frozen = crate::Timeline::from_events(prefix)
-            .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
+        .map_err(|_| SidebandError::ParentMaterializationMismatch)?;
         let transcript_ids = frozen.branch_transcript_with_ids().0;
         let unloaded = frozen.completed_compaction_unloaded_branch_ids();
         let live = frozen.surface_ids();
@@ -1459,6 +1468,16 @@ mod tests {
             ConversationItem::user("current task"),
         ])
         .unwrap();
+        let diagnostic = || {
+            crate::TimelineEventKind::Observation(crate::ObservationEvent {
+                scope: "shell".into(),
+                name: "diagnostic".into(),
+                turn: None,
+                step: None,
+                data: None,
+            })
+        };
+        parent.record(diagnostic()).unwrap();
         parent
             .record(crate::TimelineEventKind::Control(crate::ControlEvent {
                 revision: 1,
@@ -1474,6 +1493,7 @@ mod tests {
             }))
             .unwrap();
         let control_context_id = *parent.surface_ids().last().unwrap();
+        parent.record(diagnostic()).unwrap();
         let source_ref = TimelineRangeRef {
             timeline_id: "parent".into(),
             first_seq: 0,
@@ -1529,5 +1549,44 @@ mod tests {
         sideband
             .validate_parent("parent", &parent, spawn_event.seq.get(), &spawn)
             .unwrap();
+
+        let retained = parent
+            .events()
+            .iter()
+            .filter(|event| !crate::Timeline::is_diagnostic(event))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(crate::Timeline::from_events(retained.clone()).is_err());
+        let indexed = crate::Timeline::from_indexed_prefix(
+            retained,
+            parent.next_seq(),
+            parent.first_event_at_ms(),
+        )
+        .unwrap();
+        sideband
+            .validate_parent("parent", &indexed, spawn_event.seq.get(), &spawn)
+            .unwrap();
+
+        let SidebandEventKind::Request(request) = &sideband.events()[0].kind else {
+            unreachable!();
+        };
+        let mut beyond_frontier = request.clone();
+        beyond_frontier.source_refs[0].last_seq = parent.next_seq().get();
+        let mut altered = sideband.events().to_vec();
+        let SidebandEventKind::Attempt(attempt) = &mut altered[1].kind else {
+            unreachable!();
+        };
+        attempt.assembly_manifest.source_revision = Some(parent.surface_revision() + 1);
+        let altered = SidebandTimeline::from_events(altered).unwrap();
+        for candidate in [&parent, &indexed] {
+            assert!(matches!(
+                sideband.validate_recall_materialization(candidate, &beyond_frontier),
+                Err(SidebandError::ParentMaterializationMismatch)
+            ));
+            assert!(matches!(
+                altered.validate_parent("parent", candidate, spawn_event.seq.get(), &spawn),
+                Err(SidebandError::ParentMaterializationMismatch)
+            ));
+        }
     }
 }

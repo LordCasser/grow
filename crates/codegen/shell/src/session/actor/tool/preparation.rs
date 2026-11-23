@@ -942,6 +942,9 @@ impl SessionActor {
             if !hard_eligible {
                 let message = if mcp_target.is_some() {
                     "Rejected: this exact MCP target is outside the subagent's inherited transport eligibility or the live binding changed; it cannot be approved on this child. Use ask_parent to report the concrete dependency."
+                } else if matches!(&tool_input, ToolInput::SendSubagentMessage(input) if input.reply_to.is_none())
+                {
+                    "Rejected: proactive messaging is outside this child's eligibility and cannot be approved. Deliver completed work in your final response; Grow returns it to the parent. Use ask_parent for a concrete question that blocks the task."
                 } else {
                     "Rejected: this exact tool identity is outside the subagent's authored eligibility ceiling or immutable child policy; it cannot be approved on this child. Use ask_parent to report the concrete need so the parent can handle it or reassign the task."
                 };

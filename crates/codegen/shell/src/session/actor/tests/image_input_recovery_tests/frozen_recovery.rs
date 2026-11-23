@@ -513,6 +513,169 @@ fn manual_flush_slash_admits_while_foreground_owns_a_turn() {
 }
 
 #[test]
+fn side_question_recovery_rejects_over_budget_text_for_the_selected_image() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            use crate::session::storage::StorageAdapter as _;
+            use chat_state::{SidebandEventKind, SidebandOutcome, SidebandPurpose};
+
+            const LIMIT: u64 = 8_000;
+            let server = MockInferenceServer::start().await.unwrap();
+            let description = "visible image evidence ".repeat(2_000);
+            server.enqueue_response("/v1/messages", multimodal_capability_rejection());
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn(description.trim(), "vision-model"),
+            );
+            let root = tempfile::tempdir().unwrap();
+            let storage =
+                crate::session::storage::JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let info = SessionInfo {
+                id: acp::SessionId::new("test-actor"),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            };
+            storage
+                .init_session(&info, crate::agent::models::ModelId::new("test-model"))
+                .await
+                .unwrap();
+            let seed = chat_state::Timeline::from_seed(vec![ConversationItem::system(
+                "test system prompt",
+            )])
+            .unwrap();
+            for event in seed.events() {
+                storage
+                    .append_timeline_event_durable(&info, event)
+                    .await
+                    .unwrap();
+            }
+            let (actor, _gateway, persistence) = actor_with_sampler_and_storage(
+                &server,
+                Some("vision"),
+                Some(storage.clone()),
+                None,
+            )
+            .await;
+            let mut route = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            route.context_window = std::num::NonZeroU64::new(LIMIT).unwrap();
+            actor.chat_state_handle.replace_sampling_route(route);
+
+            let mut history = image_history(false);
+            history.push(ConversationItem::assistant("old context ".repeat(5_000)));
+            history.extend(image_history(false));
+            replace_test_surface(&actor.chat_state_handle, history).await;
+            let frozen = actor.freeze_sideband_surface().await.unwrap();
+            let old_image_id = frozen.surface_ids[1];
+            let selected_image_id = frozen.surface_ids[3];
+
+            assert!(
+                actor
+                    .handle_side_question("Explain the latest image")
+                    .await
+                    .is_err()
+            );
+            let requests = server.requests();
+            assert_eq!(
+                requests.len(),
+                2,
+                "expected one answer attempt and one description"
+            );
+            let initial = requests[0].body.as_ref().unwrap();
+            assert_eq!(count_wire_images(initial), 1);
+            let wire = initial.to_string();
+            assert!(wire.contains("Explain the latest image"));
+            assert!(!wire.contains("old context"));
+            assert_eq!(requests[1].body.as_ref().unwrap()["model"], "vision-model");
+            assert!(persistence.attempted_projections().is_empty());
+
+            let loaded = storage.load_session_without_updates(&info).await.unwrap();
+            let ledgers = storage
+                .read_sideband_ledgers_sync(&info, &loaded.timeline)
+                .unwrap();
+            let ledger_for = |purpose| {
+                let spawn = loaded
+                    .timeline
+                    .events()
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Sideband(spawn)
+                            if spawn.purpose == purpose =>
+                        {
+                            Some(spawn)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                &ledgers[&spawn.sideband_id]
+            };
+            let question_events = ledger_for(SidebandPurpose::SideQuestion);
+            let [request, attempt, end] = question_events.as_slice() else {
+                panic!("expected only a SideQuestion request, first attempt and failed end");
+            };
+            let SidebandEventKind::Request(request) = &request.kind else {
+                panic!("expected a request")
+            };
+            let SidebandEventKind::Attempt(attempt) = &attempt.kind else {
+                panic!("expected an attempt")
+            };
+            let SidebandEventKind::End(end) = &end.kind else {
+                panic!("expected an end")
+            };
+            assert_eq!(attempt.attempt_no, 1);
+            assert_eq!(attempt.input_refs, [frozen.input_ref]);
+            assert_eq!(
+                attempt.assembly_manifest.source_revision,
+                Some(frozen.surface_revision)
+            );
+            assert_eq!(
+                attempt.assembly_manifest.context_surface_ids,
+                [frozen.surface_ids[0], selected_image_id]
+            );
+            assert!(attempt.assembly_manifest.materialized_input_tokens <= LIMIT);
+            assert_eq!(end.outcome, SidebandOutcome::Failed);
+
+            let mut described = frozen.surface[3].clone();
+            let replacement =
+                crate::session::image_describe::render_image_description_block(description.trim());
+            sampling_types::conversation::replace_item_images_with_text(
+                &mut described,
+                &replacement,
+            );
+            let estimate =
+                chat_state::estimate_request_input_tokens(&ConversationRequest::from_items(vec![
+                    frozen.surface[0].clone(),
+                    described,
+                    ConversationItem::user(request.prompt.clone()),
+                ]));
+            assert!(estimate > LIMIT);
+            assert!(
+                end.error
+                    .as_deref()
+                    .unwrap()
+                    .contains(&format!("estimated {estimate} tokens, limit {LIMIT}"))
+            );
+
+            let description_events = ledger_for(SidebandPurpose::ImageDescription);
+            let description_attempts = description_events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    SidebandEventKind::Attempt(attempt) => Some(&attempt.assembly_manifest),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(description_attempts.len(), 1);
+            let manifest = description_attempts[0];
+            assert_eq!(manifest.source_revision, Some(frozen.surface_revision));
+            assert_eq!(manifest.selected_surface_ids, [selected_image_id]);
+            assert_ne!(selected_image_id, old_image_id);
+        }));
+    });
+}
+
+#[test]
 fn recovered_flush_text_uses_the_existing_input_ceiling() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -217,6 +217,9 @@ fn compaction_terminal_replay_preserves_one_immutable_result() {
         GrowSessionUpdate::AutoCompactCancelled {
             reason: shell::extensions::notification::AutoCompactCancelReason::UserCancelled,
         },
+        GrowSessionUpdate::AutoCompactCancelled {
+            reason: shell::extensions::notification::AutoCompactCancelReason::NoEligibleRange,
+        },
     ] {
         let mut app = make_app_with_agent("s1");
         app.agents

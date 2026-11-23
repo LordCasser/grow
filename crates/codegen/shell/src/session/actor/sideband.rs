@@ -1,7 +1,9 @@
 //! Durable sideband lifecycle shared by every auxiliary model call.
 
 use crate::session::goal_tracker::GoalTokenUsage;
-use sampling_types::{ConversationRequest, ConversationResponse};
+use sampling_types::{ConversationItem, ConversationRequest, ConversationResponse};
+
+mod question;
 
 use crate::session::SessionActor;
 use crate::session::notifications::NotificationSender;
@@ -62,6 +64,14 @@ pub(crate) struct SidebandRun {
     admission_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
+/// Questions have a source coordinate for each projected history item. Other
+/// consumers select and transform their own window from the frozen Surface.
+#[derive(Clone, Copy)]
+pub(super) enum SidebandImageSources<'a> {
+    Selection(&'a [chat_state::SurfaceId], u64),
+    Surface(&'a [ConversationItem], &'a [chat_state::SurfaceId], u64),
+}
+
 impl SessionActor {
     /// Freeze the acknowledged Surface and select existing image descriptions
     /// on its copy. Each consumer retains its own history and budget projection.
@@ -102,11 +112,7 @@ impl SessionActor {
     pub(super) async fn recover_sideband_images(
         &self,
         items: &mut [sampling_types::ConversationItem],
-        frozen: (
-            &[sampling_types::ConversationItem],
-            &[chat_state::SurfaceId],
-            u64,
-        ),
+        frozen: SidebandImageSources<'_>,
         image_key: &sampling_types::ModelImageInputKey,
     ) -> Result<(), String> {
         use sampling_types::conversation::{
@@ -121,27 +127,35 @@ impl SessionActor {
             _ = self.sideband_cancel.cancelled() => return Err("sideband context cancelled".into()),
             guard = self.image_projection_gate.write() => guard,
         };
-        let sources = conversation_image_groups(frozen.0);
-        let mut groups = Vec::with_capacity(requested.len());
-        let mut end = sources.len();
-        // Portable consumers retain an ordered suffix/subsequence. Match from
-        // the end so identical images in an omitted older turn are not treated
-        // as selected sources or described needlessly.
-        for group in requested.iter().rev() {
-            let index = sources[..end]
-                .iter()
-                .rposition(|source| {
-                    source.fingerprint == group.fingerprint
-                        && source.source == group.source
-                        && source.source_text == group.source_text
-                        && source.tool_call.as_ref().map(|call| &call.tool_call_id)
-                            == group.tool_call.as_ref().map(|call| &call.tool_call_id)
-                })
-                .ok_or("selected image source is absent from frozen context")?;
-            groups.push(sources[index].clone());
-            end = index;
-        }
-        groups.reverse();
+        let matched;
+        let (groups, source_ids, revision) = match frozen {
+            SidebandImageSources::Selection(ids, revision) => (requested.as_slice(), ids, revision),
+            SidebandImageSources::Surface(surface, ids, revision) => {
+                let sources = conversation_image_groups(surface);
+                let mut groups = Vec::with_capacity(requested.len());
+                let mut end = sources.len();
+                // Portable consumers retain an ordered suffix/subsequence. Match from
+                // the end so identical images in an omitted older turn are not treated
+                // as selected sources or described needlessly.
+                for group in requested.iter().rev() {
+                    let index = sources[..end]
+                        .iter()
+                        .rposition(|source| {
+                            source.fingerprint == group.fingerprint
+                                && source.source == group.source
+                                && source.source_text == group.source_text
+                                && source.tool_call.as_ref().map(|call| &call.tool_call_id)
+                                    == group.tool_call.as_ref().map(|call| &call.tool_call_id)
+                        })
+                        .ok_or("selected image source is absent from frozen context")?;
+                    groups.push(sources[index].clone());
+                    end = index;
+                }
+                groups.reverse();
+                matched = groups;
+                (matched.as_slice(), ids, revision)
+            }
+        };
         let operation_id = uuid::Uuid::now_v7().simple().to_string();
         let prompt_id = self.current_prompt_id.lock().ok().and_then(|id| id.clone());
         use crate::extensions::notification::{ImageRecoveryOperationState, SessionUpdate};
@@ -157,16 +171,16 @@ impl SessionActor {
             biased;
             _ = self.sideband_cancel.cancelled() => None,
             shadows = self.describe_frozen_image_groups(
-                frozen.1, frozen.2, &groups,
+                source_ids, revision, groups,
                 image_key, &operation_id, prompt_id.as_deref(),
             ) => Some(shadows),
         };
         let mut converted = 0;
         if let Some(shadows) = &shadows {
-            for (group, source) in requested.iter().zip(&groups) {
+            for (group, source) in requested.iter().zip(groups) {
                 if let Some(shadow) = shadows
                     .iter()
-                    .find(|shadow| shadow.source == frozen.1[source.item_index])
+                    .find(|shadow| shadow.source == source_ids[source.item_index])
                 {
                     replace_item_images_with_text(
                         &mut items[group.item_index],
@@ -209,11 +223,7 @@ impl SessionActor {
     pub(super) async fn prepare_sideband_images(
         &self,
         items: &mut [sampling_types::ConversationItem],
-        frozen: (
-            &[sampling_types::ConversationItem],
-            &[chat_state::SurfaceId],
-            u64,
-        ),
+        frozen: SidebandImageSources<'_>,
         image_key: &sampling_types::ModelImageInputKey,
     ) -> Result<(), String> {
         if self.model_image_input_is_unsupported(image_key).await {
@@ -230,11 +240,7 @@ impl SessionActor {
         run: &mut SidebandRun,
         client: &sampler::SamplingClient,
         request: &mut ConversationRequest,
-        frozen: (
-            &[sampling_types::ConversationItem],
-            &[chat_state::SurfaceId],
-            u64,
-        ),
+        frozen: SidebandImageSources<'_>,
         image_key: &sampling_types::ModelImageInputKey,
     ) -> Result<Result<ConversationResponse, sampling_types::SamplingError>, SidebandRunError> {
         let result = run
@@ -793,6 +799,17 @@ impl SidebandRun {
             .await?;
             return Err(error.into());
         }
+        let input_tokens = chat_state::estimate_request_input_tokens(request);
+        if matches!(
+            recorded_request.purpose,
+            chat_state::SidebandPurpose::InfoRequest | chat_state::SidebandPurpose::SideQuestion
+        ) && input_tokens > recorded_request.budget_policy.max_input_tokens_per_attempt
+        {
+            return Err(question::input_budget_error(
+                input_tokens,
+                recorded_request.budget_policy.max_input_tokens_per_attempt,
+            ));
+        }
         let attempt_no = u32::try_from(
             self.timeline
                 .events()
@@ -830,9 +847,7 @@ impl SidebandRun {
                         source_revision,
                         context_surface_ids,
                         selected_surface_ids,
-                        materialized_input_tokens: chat_state::estimate_request_input_tokens(
-                            request,
-                        ),
+                        materialized_input_tokens: input_tokens,
                         max_output_tokens: request.max_output_tokens.map(u64::from),
                     },
                     feedback,

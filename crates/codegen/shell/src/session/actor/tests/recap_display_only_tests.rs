@@ -1352,7 +1352,7 @@ fn assert_side_question_wire_pairs(body: &serde_json::Value, expected: &[&str]) 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn side_question_retry_retains_frozen_tool_evidence() {
+async fn side_question_retry_retains_budgeted_frozen_tool_evidence() {
     use sampling_types::{ApiBackend, ToolCall};
     use test_support::{
         InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse,
@@ -1362,7 +1362,7 @@ async fn side_question_retry_retains_frozen_tool_evidence() {
         .run_until(async {
             let (gateway_tx, _grx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _prx, events) = sideband_persistence_harness();
-            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let actor = create_test_actor(0, 8_000, 85, gateway_tx, persistence_tx).await;
             let server = MockInferenceServer::start().await.unwrap();
             server.set_response("Frozen side answer.");
             let mut overload = server.expect_response_blocked(
@@ -1383,7 +1383,7 @@ async fn side_question_retry_retains_frozen_tool_evidence() {
             replace_test_surface(
                 &actor.chat_state_handle,
                 vec![
-                    ConversationItem::user("Deploy the fix."),
+                    ConversationItem::user(format!("Old deployment notes: {}", "x".repeat(40_000))),
                     ConversationItem::assistant_tool_calls(vec![ToolCall {
                         id: "deploy".into(),
                         name: "run_terminal_command".into(),
@@ -1435,12 +1435,12 @@ async fn side_question_retry_retains_frozen_tool_evidence() {
                 .collect();
             assert_eq!(bodies.len(), 2);
             assert_eq!(bodies[0], bodies[1], "retry must reuse the frozen request");
-            assert!(bodies[0].to_string().contains("Frozen deployment result."));
-            assert!(
-                !bodies[0]
-                    .to_string()
-                    .contains("New main context after sideband freeze.")
-            );
+            let wire = bodies[0].to_string();
+            assert!(wire.contains("test system prompt"));
+            assert!(wire.contains("Is deployment finished?"));
+            assert!(wire.contains("Frozen deployment result."));
+            assert!(!wire.contains("Old deployment notes:"));
+            assert!(!wire.contains("New main context after sideband freeze."));
             assert_side_question_wire_pairs(bodies[0], &["deploy"]);
             assert!(bodies[0].get("tools").is_none());
             assert!(bodies[0].get("tool_choice").is_none());
@@ -1452,7 +1452,10 @@ async fn side_question_retry_retains_frozen_tool_evidence() {
                     _ => None,
                 })
                 .unwrap();
-            assert_eq!(source_refs, &vec![frozen.input_ref]);
+            assert_eq!(
+                source_refs.as_slice(),
+                std::slice::from_ref(&frozen.input_ref)
+            );
             let attempts: Vec<_> = events
                 .iter()
                 .filter_map(|event| match &event.kind {
@@ -1463,7 +1466,77 @@ async fn side_question_retry_retains_frozen_tool_evidence() {
             assert_eq!(attempts.len(), 2);
             for attempt in attempts {
                 assert_eq!(&attempt.input_refs, source_refs);
+                let manifest = &attempt.assembly_manifest;
+                assert_eq!(manifest.source_revision, Some(frozen.surface_revision));
+                assert_eq!(
+                    manifest.context_surface_ids,
+                    [
+                        frozen.surface_ids[0],
+                        frozen.surface_ids[2],
+                        frozen.surface_ids[3]
+                    ],
+                );
+                assert!(manifest.materialized_input_tokens <= 8_000);
             }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn side_question_over_budget_records_failed_without_provider_attempt() {
+    use test_support::MockInferenceServer;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _grx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _prx, events) = sideband_persistence_harness();
+            let mut actor =
+                create_test_actor(0, 8_000, 85, gateway_tx, persistence_tx.clone()).await;
+            // Observe the ledger before acknowledging it to the question owner.
+            actor.notifications.persistence_tx = persistence_tx;
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = server.url();
+            config.api_backend = sampling_types::ApiBackend::Messages;
+            actor.chat_state_handle.replace_sampling_route(config);
+            let question = format!("Can you explain these notes? {}", "x".repeat(40_000));
+            replace_test_surface(&actor.chat_state_handle, Vec::new()).await;
+            let mut required_items = actor.chat_state_handle.get_conversation().await;
+
+            let error = actor.handle_side_question(&question).await.unwrap_err();
+            assert!(
+                error.to_string().contains("input budget exceeded"),
+                "{error}"
+            );
+            assert_eq!(server.request_count(), 0);
+
+            let events = events.lock();
+            let [request, end] = events.as_slice() else {
+                panic!("expected only a Sideband request and failed end");
+            };
+            let chat_state::SidebandEventKind::Request(request) = &request.kind else {
+                panic!("expected a SideQuestion request");
+            };
+            assert_eq!(request.purpose, chat_state::SidebandPurpose::SideQuestion);
+            assert!(request.prompt.ends_with(&question));
+            assert_eq!(request.budget_policy.max_input_tokens_per_attempt, 8_000);
+            required_items.push(ConversationItem::user(request.prompt.clone()));
+            let estimate = chat_state::estimate_request_input_tokens(&ConversationRequest {
+                items: required_items,
+                ..Default::default()
+            });
+            let chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                outcome: chat_state::SidebandOutcome::Failed,
+                error: Some(detail),
+            }) = &end.kind
+            else {
+                panic!("expected a failed Sideband end with a budget diagnostic");
+            };
+            assert!(detail.contains("8000"), "missing budget limit: {detail}");
+            assert!(
+                detail.contains(&estimate.to_string()),
+                "missing required token estimate: {detail}"
+            );
         })
         .await;
 }

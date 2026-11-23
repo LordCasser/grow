@@ -982,10 +982,10 @@ impl TranscriptProjection {
                         meta.event_id,
                     ));
             }
-            GrowUpdate::AutoCompactCancelled { .. } => {
+            GrowUpdate::AutoCompactCancelled { reason } => {
                 self.scrollback
                     .push_block(RenderBlock::session_event_with_id(
-                        SessionEvent::CompactionCancelled,
+                        SessionEvent::CompactionCancelled(reason),
                         meta.event_id,
                     ));
             }
