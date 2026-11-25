@@ -1046,6 +1046,44 @@ fn committed_block_uses_owning_session_cwd_for_tool_paths() {
 }
 
 #[test]
+fn committed_skill_keeps_its_resource_and_outcome_on_a_narrow_terminal() {
+    use pager::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
+    use ratatui::buffer::Buffer;
+
+    let skill = OtherToolCallBlock::new(
+        "Skill: user:guide · references/共享/architecture/implementation/guidelines/check.md",
+        "Failed · args: --invalid",
+    )
+    .with_error("Resource loads do not accept args");
+    let mut entry = ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Skill(skill)));
+    let appearance = default_appearance();
+    let mode = minimal_commit_display_mode(&entry.block, &appearance);
+    assert_eq!(mode, DisplayMode::Truncated);
+    entry.set_display_mode(mode);
+    let theme = Theme::current();
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), committed_frame());
+    for width in [0, 1, 64] {
+        let area = Rect::new(0, 0, width, renderer.desired_height(width));
+        let mut buffer = Buffer::empty(area);
+        renderer.render(area, &mut buffer);
+        if width == 64 {
+            let rows: Vec<String> = (0..area.height)
+                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
+            let header = rows.iter().find(|row| row.contains("user:guide")).unwrap();
+            assert!(
+                header.contains("check.md") && header.contains("Failed"),
+                "{header}"
+            );
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("Resource loads do not accept args"))
+            );
+        }
+    }
+}
+
+#[test]
 fn committed_blocks_fit_desired_height() {
     // Thinking blocks render zero rows unless `show_thinking_blocks` is on.
     // The toggle is a thread-local, so pin it on here so the thinking

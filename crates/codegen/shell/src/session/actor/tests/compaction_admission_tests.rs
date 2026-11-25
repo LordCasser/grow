@@ -138,9 +138,25 @@ fn storage_failure_at_compaction_completion(shared: bool) {
 // Forward the real ChatState ACK protocol while controlling one selected
 // frontier. This does not claim to test filesystem persistence.
 fn spawn_ack_writer(
+    receiver: mpsc::UnboundedReceiver<PersistenceMsg>,
+    on_timeline: impl FnMut(
+        chat_state::TimelineEvent,
+        tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    ) + 'static,
+) -> tokio::task::JoinHandle<()> {
+    spawn_ack_writer_with_sideband(receiver, on_timeline, |_, ack| {
+        let _ = ack.send(Ok(()));
+    })
+}
+
+fn spawn_ack_writer_with_sideband(
     mut receiver: mpsc::UnboundedReceiver<PersistenceMsg>,
     mut on_timeline: impl FnMut(
         chat_state::TimelineEvent,
+        tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    ) + 'static,
+    mut on_sideband: impl FnMut(
+        chat_state::SidebandEvent,
         tokio::sync::oneshot::Sender<std::io::Result<()>>,
     ) + 'static,
 ) -> tokio::task::JoinHandle<()> {
@@ -150,8 +166,10 @@ fn spawn_ack_writer(
                 PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {
                     on_timeline(event, respond_to)
                 }
-                PersistenceMsg::SidebandDurablyAndAck { respond_to, .. }
-                | PersistenceMsg::SamplingBarrier { respond_to, .. } => {
+                PersistenceMsg::SidebandDurablyAndAck { event, respond_to } => {
+                    on_sideband(event, respond_to)
+                }
+                PersistenceMsg::SamplingBarrier { respond_to, .. } => {
                     let _ = respond_to.send(Ok(()));
                 }
                 PersistenceMsg::AppendUpdateBufferedAndAck { respond_to, .. }
@@ -707,4 +725,65 @@ fn suspension_at_summary_ack(expire_first: bool) {
             let _ = writer.await;
         }));
     });
+}
+
+#[test]
+fn cancelled_promoted_preventive_summary_propagates_a_failed_sideband_terminal_ack() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            use test_support::{InferenceEndpoint, InferenceRequestMatcher};
+            let timeout = std::time::Duration::from_secs(5);
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut provider = server.expect_response_blocked("eventual rejected summary",
+                InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                ScriptedResponse::json(400, json!({"error":{"type":"invalid_request_error","message":"summary rejected"}})));
+            let (gateway_tx, gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, persistence_rx) = mpsc::unbounded_channel();
+            let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+            let mut first = Some(terminal_tx);
+            let io_failure = || std::io::Error::new(std::io::ErrorKind::InvalidData, "failed Sideband terminal ACK during cancellation");
+            let _writer = spawn_ack_writer_with_sideband(persistence_rx, |_, ack| { let _ = ack.send(Ok(())); }, move |event, ack| {
+                if matches!(event.kind, chat_state::SidebandEventKind::End(chat_state::SidebandEnd { outcome: chat_state::SidebandOutcome::Failed, .. })) {
+                    if let Some(first) = first.take() { first.send(ack).unwrap(); }
+                    else { let _ = ack.send(Err(io_failure())); }
+                } else { let _ = ack.send(Ok(())); }
+            });
+            let (mut actor, events) = create_test_actor_ex_with_physical_projection(0, 100_000, 80, gateway_tx, persistence_tx.clone()).await;
+            // The default fixture mirrors Sideband events to an observer and synthesizes their ACKs.
+            actor.notifications.persistence_tx = persistence_tx;
+            let (actor, mut gateway, _) = configure_actor_with_sampler(&server, sampling_types::ApiBackend::Messages, sampler::OutputDelivery::Irreversible, None, actor, gateway_rx, events).await;
+            actor.compaction.pre_prune.set(false);
+            seed_closed_compaction_range(&actor).await;
+            actor.chat_state_handle.record_provider_context_anchor(75_000);
+            actor.state.lock().await.foreground = ForegroundState::RegularTurn(running_task_stub("terminal-ack"));
+            actor.background_compaction_boundary().await.unwrap();
+            tokio::time::timeout(timeout, provider.wait_blocked()).await.unwrap();
+            actor.chat_state_handle.record_provider_context_anchor(85_000);
+            let trigger = actor.check_auto_compact_needed(None).await.unwrap();
+            let promoted = tokio::task::spawn_local({ let actor = actor.clone(); async move { actor.run_compact_only(trigger).await } });
+            tokio::time::timeout(timeout, async {
+                while !actor.chat_state_handle.timeline_events().await.unwrap().iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Promoted { .. }))) {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            provider.release();
+            let ack = tokio::time::timeout(timeout, terminal_rx).await.unwrap().unwrap();
+            actor.compaction.cancel.request_cancel();
+            ack.send(Err(io_failure())).unwrap();
+            let error = tokio::time::timeout(timeout, promoted).await.unwrap().unwrap().expect_err("the failed durable ACK must survive cancellation");
+            assert!(crate::session::commands::is_fatal_turn_boundary_error(&error));
+            assert!(format!("{error:?}").contains("failed Sideband terminal ACK"));
+            assert!(actor.chat_state_handle.timeline_events().await.unwrap().iter().any(|event|
+                matches!(&event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Failed { error, .. }) if error.contains("failed Sideband terminal ACK"))));
+            let mut presentation = String::new();
+            while let Ok(message) = gateway.try_recv() { presentation.push_str(&format!("{message:?}")); }
+            assert!(presentation.contains("auto_compact_failed"));
+            assert!(!presentation.contains("auto_compact_cancelled"));
+            assert_eq!(server.messages_request_count(), 1);
+        }))
+    })
 }

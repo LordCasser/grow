@@ -1145,7 +1145,7 @@ fn verbatim_or_normalize_fork_with_ref(
     {
         return Err("parent Surface has no inheritable content".to_string());
     }
-    let estimated_tokens = chat_state::estimate_conversation_tokens(&items);
+    let estimated_tokens = chat_state::estimate_projected_message_tokens(&items);
     const SAFE_FORK_PERCENT: u64 = 80;
     let threshold = child_context_window * SAFE_FORK_PERCENT / 100;
     if estimated_tokens <= threshold && conversation_tail_is_complete(&items) {

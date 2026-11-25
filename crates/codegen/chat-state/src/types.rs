@@ -144,6 +144,8 @@ mod conversation_count_tests {
 pub struct AutoCompactTrigger {
     /// Current projected context pressure.
     pub projected_tokens: u64,
+    /// Message estimate for cold replay of the durable history.
+    pub portable_history_tokens: u64,
     /// Model's context window size.
     pub context_window: NonZeroU64,
     /// Current utilization as a percentage (0–100).

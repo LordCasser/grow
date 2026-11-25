@@ -126,6 +126,128 @@ fn latest_page(
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn indexed_skill_fragment_pages_restore_the_resource_and_terminal_identity() {
+    use crate::scrollback::blocks::tool::ToolCallBlock;
+    use serde_json::json;
+    use shell::session::info::Info;
+    use shell::session::storage::{JsonlStorageAdapter, StorageAdapter};
+
+    let root = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("paged-skill"),
+        cwd: root.path().to_string_lossy().into_owned(),
+    };
+    let resource = "references/shared/architecture/implementation/records.jsonl";
+    let prepared = format!(
+        "<skill_resource name=\"user:guide\" resource=\"{resource}\">\n{}\n</skill_resource>",
+        "{\"a\":\"b\"}\n".repeat(80_000)
+    );
+    assert!(prepared.len() < 1024 * 1024);
+    let metadata = json!({"grow/tool":{"kind":"skill"}, "another/field":{"nested":true}});
+    let start = acp::ToolCall::new("large-skill", "load_skill")
+        .kind(acp::ToolKind::Other)
+        .raw_input(Some(json!({"name":"user:guide","resource":resource})))
+        .meta(metadata.as_object().cloned());
+    let done = acp::ToolCallUpdate::new(
+        start.tool_call_id.clone(),
+        acp::ToolCallUpdateFields::new()
+            .status(acp::ToolCallStatus::Completed)
+            .raw_output(Some(json!({"type":"Dynamic","value":{
+                "skill_name":"guide","source":format!("/skills/guide/{resource}"),
+                "args":"","prepared_body":prepared
+            }}))),
+    );
+    {
+        let storage = JsonlStorageAdapter::with_root(root.path().to_owned());
+        storage
+            .init_session(&info, shell::agent::models::ModelId::new("test/test-model"))
+            .await
+            .unwrap();
+        for update in [
+            acp::SessionUpdate::ToolCall(start),
+            acp::SessionUpdate::ToolCallUpdate(done),
+        ] {
+            storage
+                .append_update(
+                    &info,
+                    &SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                        info.id.clone(),
+                        update,
+                    ))),
+                )
+                .await
+                .unwrap();
+        }
+        let publish = chat_state::Timeline::default()
+            .record(chat_state::TimelineEventKind::Observation(
+                chat_state::ObservationEvent {
+                    scope: "test".into(),
+                    name: "publish".into(),
+                    turn: None,
+                    step: None,
+                    data: None,
+                },
+            ))
+            .unwrap();
+        storage
+            .append_timeline_event_durable(&info, &publish)
+            .await
+            .unwrap();
+    }
+    let pages = shell::session::testkit::read_indexed_history_fixture(root.path(), &info)
+        .await
+        .unwrap();
+    let fragments: Vec<_> = pages
+        .iter()
+        .flatten()
+        .filter_map(|row| row.fragment)
+        .collect();
+    assert!(fragments.len() > 1);
+    assert!(
+        fragments
+            .iter()
+            .any(|part| part.end_exclusive > 1024 * 1024)
+    );
+
+    let mut app = test_app_with_agent();
+    let view = agent(&mut app);
+    bind(view, &info.id);
+    for (index, rows) in pages.into_iter().enumerate() {
+        let query = if index == 0 {
+            HistoryPageQuery::Latest
+        } else {
+            HistoryPageQuery::Before {
+                cursor: "older".into(),
+            }
+        };
+        let outcome = view.apply_history_page(
+            GENERATION,
+            &query,
+            latest_page(&info.id, rows, Some("older".into())),
+        );
+        assert!(matches!(outcome, HistoryPageOutcome::Adopted));
+    }
+    let reconstructed = super::canonical_updates(&view.history_window).unwrap();
+    assert!(reconstructed.iter().any(|(_, update)| matches!(update,
+        SessionUpdate::Acp(notification)
+            if matches!(&notification.update, acp::SessionUpdate::ToolCall(call)
+                if call.meta.as_ref() == metadata.as_object()))));
+    let skills: Vec<_> = (0..view.scrollback.len())
+        .filter_map(|index| match &view.scrollback.entry(index)?.block {
+            RenderBlock::ToolCall(ToolCallBlock::Skill(skill)) => Some(skill),
+            _ => None,
+        })
+        .collect();
+    let [skill] = skills.as_slice() else {
+        panic!("expected one reconstructed Skill row")
+    };
+    assert_eq!(skill.name, format!("Skill: user:guide · {resource}"));
+    assert_eq!(skill.summary, "Loaded");
+    assert!(skill.output.as_deref().unwrap().ends_with(&prepared));
+}
+
 fn scrollback_user_prompt_ids(scrollback: &ScrollbackState, message_id: &str) -> Vec<EntryId> {
     (0..scrollback.len())
         .filter_map(|index| scrollback.entry(index))

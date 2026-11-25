@@ -27,10 +27,10 @@ impl FrozenQuestion {
     ) -> Result<Self, SidebandRunError> {
         let question = ConversationItem::user(prompt);
         let projected = sampling_types::project_portable_history_with_indices(&snapshot.surface);
-        let mut mandatory = chat_state::estimate_item_tokens(&question);
+        let mut mandatory = chat_state::estimate_projected_item_tokens(&question);
         let mut total = mandatory;
         for (_, item) in &projected {
-            let cost = chat_state::estimate_item_tokens(item);
+            let cost = chat_state::estimate_projected_item_tokens(item);
             if matches!(item, ConversationItem::System(_)) {
                 mandatory += cost;
             }
@@ -49,7 +49,7 @@ impl FrozenQuestion {
             if matches!(item, ConversationItem::System(_)) {
                 continue;
             }
-            total -= chat_state::estimate_item_tokens(item);
+            total -= chat_state::estimate_projected_item_tokens(item);
             if let ConversationItem::Assistant(assistant) = item
                 && !assistant.tool_calls.is_empty()
             {
@@ -64,7 +64,7 @@ impl FrozenQuestion {
                 while let Some((index, next)) = projected.get(start)
                     && (source + 1..batch_end).contains(index)
                 {
-                    total -= chat_state::estimate_item_tokens(next);
+                    total -= chat_state::estimate_projected_item_tokens(next);
                     start += 1;
                 }
             }

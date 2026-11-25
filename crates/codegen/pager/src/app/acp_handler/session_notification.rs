@@ -2294,8 +2294,10 @@ pub(super) fn apply_session_event(
     event_id: Option<&str>,
 ) -> bool {
     match update {
-        GrowSessionUpdate::AutoCompactStarted { percentage, .. } => {
-            tracing::info!("Auto-compact started: {percentage}% context used");
+        GrowSessionUpdate::AutoCompactStarted {
+            percentage, reason, ..
+        } => {
+            tracing::info!(percentage, reason, "Auto-compact started");
             if session.compact_held_prompt.is_none() {
                 session.compact_held_prompt = session.in_flight_prompt.clone();
             }
@@ -2304,7 +2306,7 @@ pub(super) fn apply_session_event(
             session.set_live_feedback(
                 "compaction",
                 crate::scrollback::blocks::NoticeTone::Progress,
-                format!("Compacting context ({percentage}%)\u{2026}"),
+                reason.clone(),
             );
             true
         }

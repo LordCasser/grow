@@ -46,6 +46,83 @@ async fn communication_agent(actor: &SessionActor) {
     .await;
 }
 
+#[test]
+fn sampling_session_affinity_isolates_identical_openings_and_sideband_retries() {
+    fn affinity(request: &test_support::mock_server::LogEntry) -> &str {
+        request
+            .header("X-Session-Id")
+            .filter(|value| !value.is_empty())
+            .expect("owned sampling must carry a session identity")
+    }
+
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("Done.");
+            let left = actor_with_sampler_named(&server, "affinity-left").await;
+            let right = actor_with_sampler_named(&server, "affinity-right").await;
+            communication_agent(&left).await;
+            communication_agent(&right).await;
+            let mut paused = server.expect_response_blocked(
+                "first session will continue after other work",
+                test_support::InferenceRequestMatcher::foreground(
+                    test_support::InferenceEndpoint::Messages,
+                ),
+                messages_turn(&[text_block("Continuing.")], PAUSE_TURN),
+            );
+            let (result, ()) = tokio::join!(run_user_turn(&left, "shared-opener"), async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), paused.wait_blocked())
+                    .await
+                    .unwrap();
+                run_user_turn(&right, "shared-opener").await.unwrap();
+                server.enqueue_response(
+                    "/v1/messages",
+                    ScriptedResponse::json(
+                        529,
+                        json!({"error":{"type":"overloaded_error","message":"overloaded"}}),
+                    ),
+                );
+                for _ in 0..2 {
+                    assert_eq!(
+                        left.handle_side_question("Same question?").await.unwrap(),
+                        "Done."
+                    );
+                }
+                paused.release();
+            });
+            result.unwrap();
+            let requests = server.requests();
+            let [
+                left,
+                right,
+                first_question,
+                retry,
+                second_question,
+                continuation,
+            ] = requests.as_slice()
+            else {
+                panic!("expected six provider requests, got {}", requests.len());
+            };
+            let opening = left.body.as_ref().unwrap();
+            let peer = right.body.as_ref().unwrap();
+            assert_eq!(opening.get("system").unwrap(), &peer["system"]);
+            assert_eq!(opening["messages"].get(0).unwrap(), &peer["messages"][0]);
+            assert_ne!(affinity(left), affinity(right));
+            assert_eq!(affinity(left), affinity(continuation));
+            assert_eq!(affinity(first_question), affinity(retry));
+            assert_ne!(affinity(first_question), affinity(second_question));
+            for question in [first_question, second_question] {
+                assert_ne!(affinity(question), affinity(left));
+                assert_ne!(affinity(question), affinity(right));
+            }
+        }));
+    });
+}
+
 fn live_consultation(
     actor: &SessionActor,
     inquiry_id: &str,

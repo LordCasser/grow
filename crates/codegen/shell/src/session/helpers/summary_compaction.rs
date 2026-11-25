@@ -39,6 +39,12 @@ use crate::session::helpers::session_compact::{
     CompactFailure, CompactOutput, build_compaction_request_surface, generate_session_compact,
 };
 
+pub(crate) enum SummaryFailureSource {
+    Provider,
+    ImageInputUnsupported,
+    Infrastructure(String),
+}
+
 /// Wraps `generate_session_compact` as the shared engine's
 /// [`CompactionSampler`] for grow-build's range-summary pass.
 ///
@@ -67,12 +73,11 @@ pub(crate) struct ShellCompactionSampler {
     sideband_feedback: std::sync::Arc<Mutex<Option<String>>>,
     /// Full output of the most recent successful sample (for L5 telemetry).
     last_success: Mutex<Option<CompactOutput>>,
-    image_input_unsupported: std::sync::atomic::AtomicBool,
+    last_failure: Mutex<Option<SummaryFailureSource>>,
     source_ref: chat_state::TimelineRangeRef,
     source_revision: u64,
     context_surface_ids: Vec<chat_state::SurfaceId>,
     selected_surface_ids: Mutex<Vec<chat_state::SurfaceId>>,
-    infrastructure_error: Mutex<Option<String>>,
 }
 
 impl ShellCompactionSampler {
@@ -106,8 +111,7 @@ impl ShellCompactionSampler {
             context_surface_ids,
             selected_surface_ids: Mutex::new(Vec::new()),
             last_success: Mutex::new(None),
-            image_input_unsupported: std::sync::atomic::AtomicBool::new(false),
-            infrastructure_error: Mutex::new(None),
+            last_failure: Mutex::new(None),
         }
     }
 
@@ -120,13 +124,8 @@ impl ShellCompactionSampler {
         self.last_success.lock().unwrap().take()
     }
 
-    pub(crate) fn take_image_input_unsupported(&self) -> bool {
-        self.image_input_unsupported
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-    }
-
-    pub(crate) fn take_infrastructure_error(&self) -> Option<String> {
-        self.infrastructure_error.lock().unwrap().take()
+    pub(crate) fn take_failure_source(&self) -> Option<SummaryFailureSource> {
+        self.last_failure.lock().unwrap().take()
     }
 
     fn sideband_error(&self, error: SidebandRunError) -> CompactionSampleError {
@@ -137,7 +136,8 @@ impl ShellCompactionSampler {
                 | SidebandRunError::InterruptedAppendRecovered
         ) {
             let message = error.to_string();
-            *self.infrastructure_error.lock().unwrap() = Some(message.clone());
+            *self.last_failure.lock().unwrap() =
+                Some(SummaryFailureSource::Infrastructure(message.clone()));
             return CompactionSampleError::Deterministic(message);
         }
         sideband_error_to_sample_error(error)
@@ -154,6 +154,7 @@ impl CompactionSampler for ShellCompactionSampler {
         _prompt: &CompactionPrompt,
         _timeout: Duration,
     ) -> Result<LlmCompactionOutput, CompactionSampleError> {
+        self.take_failure_source();
         let remaining_secs = match self.deadline {
             Some(deadline) => {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -216,16 +217,16 @@ impl CompactionSampler for ShellCompactionSampler {
         );
         let sample = tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => Err(CompactFailure::Cancelled),
+            _ = self.cancel.cancelled() => Ok(Err(CompactFailure::Cancelled)),
             _ = async {
                 match self.deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
                     None => std::future::pending::<()>().await,
                 }
-            } => Err(CompactFailure::Deterministic(acp::Error::internal_error().data("compaction wall-clock budget exhausted"))),
+            } => Ok(Err(CompactFailure::Local { error: acp::Error::internal_error().data("compaction wall-clock budget exhausted"), deterministic: true })),
             result = async {
                 self.sideband.lock().await.run_provider(provider).await
-            } => result.map_err(|error| self.sideband_error(error))?,
+            } => result,
         };
         // `generate_session_compact` drops its exactly-once meter before it
         // returns. Settle that exact provider attempt through the lifecycle
@@ -240,9 +241,12 @@ impl CompactionSampler for ShellCompactionSampler {
             .await
             .map_err(|error| self.sideband_error(error))?;
 
-        match sample {
+        // Sideband cancellation can win after the stream reported billable usage.
+        // Settlement is a no-op for either ledger if it never admitted an attempt.
+        match sample.map_err(|error| self.sideband_error(error))? {
             Ok(output) => {
                 if let Some(failure) = summary_stop_failure(&output) {
+                    *self.last_failure.lock().unwrap() = Some(SummaryFailureSource::Provider);
                     let error = compact_failure_to_sample_error(failure);
                     *self.sideband_feedback.lock().unwrap() = Some(error.to_string());
                     Err(error)
@@ -253,10 +257,15 @@ impl CompactionSampler for ShellCompactionSampler {
                 }
             }
             Err(failure) => {
-                if matches!(&failure, CompactFailure::ImageInputUnsupported(_)) {
-                    self.image_input_unsupported
-                        .store(true, std::sync::atomic::Ordering::Release);
-                }
+                *self.last_failure.lock().unwrap() = match &failure {
+                    CompactFailure::Deterministic(_) | CompactFailure::Transient(_) => {
+                        Some(SummaryFailureSource::Provider)
+                    }
+                    CompactFailure::ImageInputUnsupported(_) => {
+                        Some(SummaryFailureSource::ImageInputUnsupported)
+                    }
+                    CompactFailure::Local { .. } | CompactFailure::Cancelled => None,
+                };
                 let error = compact_failure_to_sample_error(failure);
                 *self.sideband_feedback.lock().unwrap() = Some(error.to_string());
                 Err(error)
@@ -303,6 +312,10 @@ fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleE
         CompactFailure::Deterministic(err) => (true, err),
         CompactFailure::ImageInputUnsupported(err) => (true, err),
         CompactFailure::Transient(err) => (false, err),
+        CompactFailure::Local {
+            error,
+            deterministic,
+        } => (deterministic, error),
         CompactFailure::Cancelled => (true, CompactFailure::cancelled_error()),
     };
     let message = acp_error_message(&err);

@@ -3949,6 +3949,10 @@ Workflow、Goal、Control、CurrentMode 的持久展示 SHALL 由捕获截点内
 - **WHEN** 多个显式 Skill 行出现且用户折叠正文
 - **THEN** 每行仍保留名称和结果，显式 Skill 不参加匿名数量合并；无需新分组器或面板。
 
+#### Scenario: Collapsed rows distinguish resources of the same skill
+- **WHEN** 同一技能先加载主说明，随后显式加载包内资源，用户在实时或历史回放中查看折叠行
+- **THEN** 资源行 SHALL 在标题中显示调用指定的技能内相对路径，主说明行保留原技能标题，各行沿用对应调用的加载状态。
+
 #### Scenario: Expand resolved snapshot
 - **WHEN** 用户展开已提交 Skill 行
 - **THEN** 展示真实来源、调用参数及实际提交正文快照，不读取最新文件来替换显示内容。
@@ -5659,3 +5663,18 @@ When `session/load` attaches to a resident session, it SHALL return the current 
 
 - **WHEN** session load has no resident scheduler handle
 - **THEN** no scheduler snapshot is included and existing replay behavior remains available
+
+### Requirement: Skill identity and terminal status survive width changes and history paging
+Skill rows SHALL preserve the requested identity, resource and terminal outcome in live and fully reconstructed history. At narrow widths, the row SHALL reserve room for the outcome and show a distinguishing resource suffix when space permits. Detailed failures SHALL expose the returned reason.
+
+#### Scenario: Long paths on a narrow terminal
+- **WHEN** a 64-column display shows two resources with a long common prefix
+- **THEN** the collapsed rows show their distinct file names or suffixes and their success or failure status.
+
+#### Scenario: Large tool output is reconstructed from fragments
+- **WHEN** a skill tool output exceeds the inline history limit and all its fragments are restored
+- **THEN** the reconstructed tool retains the original structured kind, requested identity, resource and outcome.
+
+#### Scenario: Qualified names and failed or unpublished loads
+- **WHEN** two namespaces provide the same short skill name, or the loader rejects a request or cancels an unpublished group member
+- **THEN** terminal rows retain their distinct requested identities, and the failed or cancelled load exposes the corresponding outcome and reason.

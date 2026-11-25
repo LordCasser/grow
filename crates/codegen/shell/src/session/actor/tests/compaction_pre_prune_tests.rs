@@ -2711,7 +2711,7 @@ fn compaction_size_failure_allows_the_next_user_turn_to_recover() {
             .await;
             actor.compaction.pre_prune.set(false);
             seed_closed_compaction_range(&actor, 68_000).await;
-            actor.chat_state_handle.record_provider_context_anchor(85_000);
+            actor.chat_state_handle.record_provider_context_anchor(105_000);
             let before = actor.chat_state_handle.get_conversation().await;
             run_user_turn(&actor, "size-failed")
                 .await
@@ -3000,6 +3000,9 @@ mod compaction_regression_background_cancel_probe {
 
 #[path = "compaction_repromotion_tests.rs"]
 mod compaction_repromotion_tests;
+
+#[path = "portable_replay_compaction_tests.rs"]
+mod portable_replay_compaction_tests;
 
 #[path = "compaction_route_notice_tests.rs"]
 mod compaction_route_notice_tests;

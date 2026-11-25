@@ -640,7 +640,7 @@ impl Index {
                                 )
                             },
                         )? {
-                            tool_fragments::publish(&tx, reference.position, at_ms, &call)?;
+                            tool_fragments::publish(&tx, reference.position, at_ms, call)?;
                         }
                         let visible = match &event.content {
                             HistoryContent::Candidate(_) => false,

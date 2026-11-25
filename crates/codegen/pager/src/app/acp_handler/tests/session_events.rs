@@ -1049,11 +1049,11 @@
             tokens_used: 90_000,
             context_window: 131_072,
             percentage: 85,
-            reason: "threshold".into(),
+            reason: "Preparing retained history for session resume".into(),
         };
 
         assert!(apply_session_event(&update, &mut session, &mut scrollback, None));
-        assert!(session.live_status(100).is_some());
+        assert_eq!(session.live_status(100).as_deref(), Some("Preparing retained history for session resume"));
 
         session.finish_turn(&mut scrollback);
         assert_eq!(session.live_status(100), None);

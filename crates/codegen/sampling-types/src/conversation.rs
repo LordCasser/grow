@@ -1987,6 +1987,9 @@ pub struct ConversationRequest {
     pub json_output: Option<JsonOutputFormat>,
     /// Sticky routing key for prompt-cache reuse when supported by a provider.
     pub prompt_cache_key: Option<String>,
+    /// Opaque owner of this conversation on stateful HTTP transports.
+    /// Independent requests may share a prefix-cache key.
+    pub transport_session_id: Option<String>,
     /// Ephemeral same-route continuation. Never serialized into Timeline or
     /// derived from persisted history.
     pub native_continuation: Option<NativeContinuationProjection>,

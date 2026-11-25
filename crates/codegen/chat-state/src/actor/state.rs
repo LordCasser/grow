@@ -73,8 +73,37 @@ fn estimate_wire_items(items: &[ConversationItem], include_reasoning: bool) -> u
     items
         .iter()
         .filter(|item| include_reasoning || !matches!(item, ConversationItem::Reasoning(_)))
-        .map(estimate_item_tokens)
+        .map(estimate_projected_item_tokens)
         .sum()
+}
+
+/// Cost of an item retained in a provider projection. All three adapters emit
+/// model-initiated skill content through the corresponding real tool result.
+pub fn estimate_projected_item_tokens(item: &ConversationItem) -> u64 {
+    match item {
+        ConversationItem::SkillLoad(skill)
+            if skill.source == sampling_types::SkillLoadSource::Model =>
+        {
+            0
+        }
+        _ => estimate_item_tokens(item),
+    }
+}
+
+/// Message cost after the caller has selected its reasoning and history policy.
+pub fn estimate_projected_message_tokens(items: &[ConversationItem]) -> u64 {
+    items.iter().map(estimate_projected_item_tokens).sum()
+}
+
+fn estimate_portable_items(
+    items: &[ConversationItem],
+    reasoning_backend: Option<sampling_types::ApiBackend>,
+) -> u64 {
+    let include_reasoning = reasoning_backend.is_some();
+    estimate_wire_items(
+        &project_portable_history_with_reasoning(items, reasoning_backend),
+        include_reasoning,
+    )
 }
 
 pub(super) fn estimate_effective_conversation_tokens(request: &ConversationRequest) -> u64 {
@@ -89,17 +118,10 @@ fn estimate_effective_items(
         return estimate_wire_items(items, false);
     };
     let reasoning_backend = native.portable_reasoning_backend.clone();
-    let replay_reasoning = reasoning_backend.is_some();
     let Some(portable_end) = native.portable_prefix_end(items) else {
-        return estimate_wire_items(
-            &project_portable_history_with_reasoning(items, reasoning_backend),
-            replay_reasoning,
-        );
+        return estimate_portable_items(items, reasoning_backend);
     };
-    let mut total = estimate_wire_items(
-        &project_portable_history_with_reasoning(&items[..portable_end], reasoning_backend),
-        replay_reasoning,
-    );
+    let mut total = estimate_portable_items(&items[..portable_end], reasoning_backend);
     let mut cursor = portable_end;
     for span in &native.spans {
         total = total
@@ -232,8 +254,8 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
     }
 }
 
-/// Estimate token footprint: text bytes / 4, images at the per-image
-/// constant defined by [`token_estimation::IMAGE_TOKEN_ESTIMATE`].
+/// Estimate the supplied Surface items, including model skill facts retained for replay.
+/// For provider-bound message budgets use [`estimate_projected_message_tokens`].
 pub fn estimate_conversation_tokens(items: &[ConversationItem]) -> u64 {
     items.iter().map(estimate_item_tokens).sum()
 }
@@ -244,7 +266,7 @@ pub fn estimate_conversation_tokens(items: &[ConversationItem]) -> u64 {
 /// shared budgeting math gets the *same* trusted count.
 ///
 /// Where another host plugs a real BPE tokenizer into the same seam,
-/// grow-build estimates instead, reusing [`estimate_item_tokens`] so the
+/// grow-build estimates instead, reusing [`estimate_projected_item_tokens`] so the
 /// per-variant arithmetic (images, reasoning blobs, tool-call args and runtime
 /// receive pairs) stays in one place.
 pub struct EstimatedItemTokenCounter;
@@ -253,7 +275,9 @@ impl compaction::ItemTokenCounter<ConversationItem> for EstimatedItemTokenCounte
     fn count_item_tokens(&self, item: &ConversationItem) -> u32 {
         // The estimate is a `u64`; a single item never approaches `u32::MAX`
         // tokens, but saturate rather than wrap if one somehow does.
-        estimate_item_tokens(item).try_into().unwrap_or(u32::MAX)
+        estimate_projected_item_tokens(item)
+            .try_into()
+            .unwrap_or(u32::MAX)
     }
 }
 
@@ -1751,14 +1775,23 @@ impl ChatState {
         calibrated
     }
 
+    fn goal_scoped_history(&self) -> Vec<ConversationItem> {
+        sampling_types::project_conversation_for_goal_scope(
+            self.timeline.surface().to_vec(),
+            self.request_active_goal.as_ref(),
+        )
+    }
+
+    /// The message footprint a fresh lane would replay from the current Surface.
+    pub(super) fn portable_history_tokens(&self) -> u64 {
+        estimate_portable_items(&self.goal_scoped_history(), None)
+    }
+
     /// Recompute in request coordinates. Raw Surface deltas cannot be applied
     /// to a provider anchor: omitted reasoning can make that delta larger than
     /// the entire request, irreversibly losing the balance through saturation.
     pub(super) fn refresh_context_pressure(&mut self) -> u64 {
-        let mut items = sampling_types::project_conversation_for_goal_scope(
-            self.timeline.surface().to_vec(),
-            self.request_active_goal.as_ref(),
-        );
+        let mut items = self.goal_scoped_history();
         if let Some(projection) = &self.image_budget {
             if projection.use_image_descriptions {
                 // A missing description remains conservatively image-bearing;
@@ -1812,7 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn estimated_item_token_counter_matches_estimate_item_tokens() {
+    fn estimated_item_token_counter_matches_projected_item_cost() {
         use compaction::ItemTokenCounter;
 
         let counter = EstimatedItemTokenCounter;
@@ -1825,8 +1858,7 @@ mod tests {
         for item in &items {
             assert_eq!(
                 u64::from(counter.count_item_tokens(item)),
-                estimate_item_tokens(item),
-                "counter must report the same trusted count as estimate_item_tokens"
+                estimate_projected_item_tokens(item)
             );
         }
     }

@@ -380,6 +380,65 @@ impl OtherToolCallBlock {
         }
     }
 
+    /// A Skill header keeps its outcome and both ends of the requested identity.
+    /// Extra arguments follow the outcome and use any remaining columns.
+    pub(super) fn skill_output(&self, ctx: &BlockContext) -> BlockOutput {
+        use crate::render::line_utils::{truncate_line, truncate_str};
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+
+        let theme = Theme::current();
+        let muted = ctx.mute_when_collapsed(ctx.appearance.scrollback.blocks.tool.muted_collapsed);
+        let width = ctx.content_width();
+        let outcome = self.summary.split(" · args: ").next().unwrap_or_default();
+        let title_width = width.saturating_sub(outcome.width() + 2);
+        let mut title = Line::from(self.title_spans(&theme, muted));
+        if title.width() > title_width {
+            let name = title.to_string();
+            let mut suffix_start = name.len();
+            let mut suffix_width = 0;
+            for (start, grapheme) in name.grapheme_indices(true).rev() {
+                let next = suffix_width + grapheme.width();
+                if next > title_width / 2 {
+                    break;
+                }
+                suffix_start = start;
+                suffix_width = next;
+            }
+            let style = title
+                .spans
+                .last()
+                .map(|span| span.style)
+                .unwrap_or_default();
+            title = truncate_line(title, title_width - suffix_width);
+            title
+                .spans
+                .push(Span::styled(name[suffix_start..].to_owned(), style));
+        }
+        if title.width() > 0 {
+            title.spans.push(Span::raw("  "));
+        }
+        title
+            .spans
+            .push(Span::styled(outcome.to_owned(), theme.muted()));
+        let mut header = truncate_line(title, width);
+        let extra = &self.summary[outcome.len()..];
+        let available = width - header.width();
+        if !extra.is_empty() && available > 2 {
+            header
+                .spans
+                .push(Span::styled(truncate_str(extra, available), theme.muted()));
+        }
+        if ctx.mode == DisplayMode::Collapsed {
+            return BlockOutput {
+                lines: vec![header.into()],
+            };
+        }
+        let mut output = self.output(ctx);
+        output.lines[0].content = header;
+        output
+    }
+
     /// Render a communication title and status as separate wrapped rows when
     /// they cannot fit together. The title and status each get at most two
     /// rows; narrow rows retain an explicit ellipsis rather than hiding one

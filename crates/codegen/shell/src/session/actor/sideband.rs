@@ -875,6 +875,7 @@ impl SidebandRun {
             _ = cancellation.cancelled() => Err(SidebandRunError::Cancelled),
             output = async {
                 self.provider_attempt_started().await?;
+                let provider = sampler::client::with_sideband_session_id(self.timeline.sideband_id(), provider);
                 Ok(match &self.evidence {
                     Some(evidence) => evidence.scope(provider).await,
                     None => provider.await,

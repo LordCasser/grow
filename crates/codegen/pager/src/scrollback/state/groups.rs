@@ -368,6 +368,7 @@ mod tests {
         ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::skill_call(
             Some("deploy"),
             None,
+            None,
             Some("/x/skills/deploy/SKILL.md"),
             None,
             SkillDisplayStatus::Loaded,

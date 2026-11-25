@@ -40,6 +40,7 @@ pub mod usage;
 pub use actor::ChatStateActor;
 pub use actor::state::{
     estimate_conversation_tokens, estimate_item_tokens, estimate_messages_tokens,
+    estimate_projected_item_tokens, estimate_projected_message_tokens,
     estimate_request_input_tokens, estimate_system_message_tokens, estimate_tool_definition_tokens,
     estimate_tool_definitions_tokens, estimate_tool_specs_tokens,
 };

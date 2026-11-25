@@ -102,6 +102,21 @@ pub struct ToolOutputFragment {
     pub json: String,
 }
 
+/// The ACP fields carried by the joined JSON bytes of a `ToolOutputFragment`.
+/// Its identity, title, kind and status are available in each fragment header.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutputPayload {
+    #[serde(default)]
+    pub content: Vec<acp::ToolCallContent>,
+    #[serde(default)]
+    pub locations: Vec<acp::ToolCallLocation>,
+    pub raw_input: Option<serde_json::Value>,
+    pub raw_output: Option<serde_json::Value>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<acp::Meta>,
+}
+
 /// The client projection uses the same immutable turn ownership identity as
 /// Timeline; it does not define a second terminal schema.
 pub use chat_state::TurnIdentity;

@@ -185,6 +185,12 @@ impl ChatStateActor {
             }
         });
         let epoch_nonce = self.state.continuation.epoch_nonce().to_owned();
+        let lineage = lineage_routing_key(
+            timeline_id,
+            &self.state.timeline,
+            &self.state.sampling_config,
+            &epoch_nonce,
+        );
 
         // Step 3: Assemble request
         let request = ConversationRequest {
@@ -219,12 +225,8 @@ impl ChatStateActor {
             temperature: self.state.sampling_config.temperature,
             max_output_tokens: self.state.sampling_config.output_limit,
             top_p: self.state.sampling_config.top_p,
-            prompt_cache_key: Some(prompt_cache_key(
-                timeline_id,
-                &self.state.timeline,
-                &self.state.sampling_config,
-                &epoch_nonce,
-            )),
+            prompt_cache_key: Some(lineage.clone()),
+            transport_session_id: Some(lineage),
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_output,
             native_continuation,
@@ -294,7 +296,7 @@ pub(super) fn apply_image_budget_choices(
 /// branch operation, so the latest rewind event becomes the branch anchor;
 /// forks already have a distinct `timeline_id`. Provider/backend/base URL are
 /// included with the model name so equal display names cannot share a route.
-fn prompt_cache_key(
+fn lineage_routing_key(
     timeline_id: &str,
     timeline: &crate::Timeline,
     sampling: &sampling_types::SamplingConfig,
@@ -1421,7 +1423,7 @@ mod tests {
                     "indexed anchor matches the canonical event scan"
                 );
                 assert_eq!(
-                    prompt_cache_key("timeline", &timeline, &sampling, "epoch"),
+                    lineage_routing_key("timeline", &timeline, &sampling, "epoch"),
                     reverse_scan_prompt_cache_key("timeline", &timeline, &sampling, "epoch"),
                     "key bytes remain identical at {event_count} events for {placement:?}"
                 );

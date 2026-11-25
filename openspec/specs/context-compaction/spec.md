@@ -428,3 +428,55 @@ If the planner finds no eligible range, preventive automatic compaction SHALL le
 #### Scenario: Compaction is required or an actual error occurs
 - **WHEN** recovery follows a provider overflow, the request exceeds its hard window, the user explicitly requested compaction, or a durable write fails
 - **THEN** lack of a usable summary does not authorize dispatch or acknowledge the manual operation as successful. Storage failures propagate to their owner.
+
+### Requirement: Automatic compaction maintains room for portable replay
+
+During ordinary execution, preventive automatic compaction SHALL consider both the calibrated current request and the provider-neutral history a cold resume would replay under the committed Goal scope. Either input reaching the existing threshold qualifies. The portable estimate SHALL exclude omitted reasoning, incomplete tool exchanges and request-only fields. An explicit output reservation SHALL continue to apply to the current request. Presentation of current context, usage accounting and hard provider admission SHALL use their existing current-request evidence.
+
+#### Scenario: Portable tool history grows while provider usage stays low
+
+- **WHEN** complete tool exchanges grow across ordinary Steps, the provider reports a smaller context, and portable replay reaches the background or synchronous threshold
+- **THEN** the existing background or synchronous compaction path handles the eligible range, with one owner for a pending generation. Foreground feedback identifies replay-driven maintenance. A cold resume replays its committed replacement and retained tail.
+
+#### Scenario: Pruning or image projection changes the evidence
+
+- **WHEN** automatic compaction durably prunes tool results or changes image content before deciding whether to summarize
+- **THEN** it rechecks the applicable thresholds on the resulting history and current request. A low provider observation alone cannot declare the portable history small enough.
+
+#### Scenario: Portable pressure alone cannot close current provider admission
+
+- **WHEN** only the portable estimate exceeds the window and there is no eligible range, including when the oldest complete tool exchange cannot fit the summary input budget
+- **THEN** the otherwise fitting current request may proceed through ordinary admission under the existing suppression policy. An actual current request overflow or provider rejection still follows its hard recovery boundary.
+
+#### Scenario: A committed summary retains a large recent exchange
+
+- **WHEN** a summary or promotion commits before an ordinary request and the retained tail still crosses the portable threshold
+- **THEN** the same request proceeds to its current-input and output-reserve check without another replay-only summary. Subsequent model work can create new evidence for preventive compaction.
+
+#### Scenario: Omitted content and suppressed work
+
+- **WHEN** the large part of history is omitted from cold replay, or ordinary automatic compaction is suppressed
+- **THEN** that omitted content or a portable estimate alone does not start a summary outside the normal automatic compaction policy.
+
+### Requirement: Preventive summaries make progress and preserve primary admission
+Preventive compaction SHALL summarize a range only if it includes replaceable evidence beyond already committed summaries. A settled provider failure during uncommitted preventive summary generation SHALL yield to normal primary admission when the primary request fits including its output reservation and the route and account permit sampling. Provider-overflow recovery, hard overflow, cancellation, budget limits and persistence failures SHALL retain their existing authority.
+
+#### Scenario: A protected tail remains large across tool steps
+- **WHEN** a new step adds a tool result but the only eligible source consists of a previous summary
+- **THEN** no second preventive summary is dispatched for that range. A later eligible range containing the old summary and new evidence can be summarized.
+
+#### Scenario: The preventive provider fails
+- **WHEN** a preventive summary sampling attempt fails without a replacement and the complete primary request passes ordinary admission
+- **THEN** the failed attempt remains recorded and ordinary sampling can proceed without repeatedly attempting that same failed maintenance in the turn.
+
+#### Scenario: A required recovery or durable operation fails
+- **WHEN** the primary request cannot pass admission, a provider overflow requires recovery, cancellation occurs, or settlement or storage fails
+- **THEN** a failed summary does not grant primary dispatch or acknowledge a successful replacement.
+
+#### Scenario: Only the preventive summary exceeds its provider window
+- **WHEN** the summary provider rejects the source as too large and the bounded reduction cannot produce a usable summary, while the primary request independently passes admission
+- **THEN** the recorded preventive failure may yield to that primary request. A hard overflow on the primary request still requires recovery.
+
+#### Scenario: Cancellation overlaps a failed durable acknowledgement
+- **WHEN** a promoted background summary is cancelled while its worker is settling and the durable acknowledgement fails
+- **THEN** the fatal persistence error remains visible, the worker is joined, and no primary request is dispatched.

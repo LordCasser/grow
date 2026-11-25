@@ -257,6 +257,92 @@ async fn submit_emits_started_first_token_channel_completed() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_affinity_reaches_each_backend_and_respects_explicit_headers() {
+    let server = test_support::MockInferenceServer::start().await.unwrap();
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ] {
+        for (owner, configured, expected) in [
+            (Some("grow-branch-a"), None, Some("grow-branch-a")),
+            (Some("grow-branch-b"), None, Some("grow-branch-b")),
+            (
+                Some("grow-branch-b"),
+                Some("route-override"),
+                Some("route-override"),
+            ),
+            (None, None, None),
+        ] {
+            let mut config = test_config(server.url(), "test-model");
+            config.api_backend = backend.clone();
+            if let Some(value) = configured {
+                config
+                    .extra_headers
+                    .insert("X-Session-Id".into(), value.into());
+            }
+            let (events, _rx) = mpsc::unbounded_channel();
+            let handle = SamplerActor::spawn(config, RetryPolicy::default(), events);
+            let mut request = user_request("same opening");
+            request.prompt_cache_key = Some("shared-prefix".into());
+            request.transport_session_id = owner.map(str::to_owned);
+            handle
+                .submit_and_collect(RequestId::from("attempt"), request)
+                .await
+                .unwrap();
+            let requests = server.requests();
+            let sent = requests.last().unwrap();
+            if backend == ApiBackend::Responses {
+                assert_eq!(
+                    sent.body.as_ref().unwrap()["prompt_cache_key"],
+                    "shared-prefix"
+                );
+            }
+            let ids: Vec<_> = sent
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("x-session-id"))
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(ids, expected.as_slice(), "{backend:?}");
+            handle.close();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sideband_overrides_the_transport_owner_and_preserves_the_shared_cache_key() {
+    let server = test_support::MockInferenceServer::start().await.unwrap();
+    let mut config = test_config(server.url(), "test-model");
+    config.api_backend = ApiBackend::Responses;
+    let client = sampler::SamplingClient::new(config).unwrap();
+    let mut request = user_request("same opening");
+    request.prompt_cache_key = Some("shared-prefix".into());
+    request.transport_session_id = Some("main-owner".into());
+
+    sampler::client::with_sideband_session_id(
+        "sideband-owner",
+        client.conversation_collect(request.clone()),
+    )
+    .await
+    .unwrap();
+    client.conversation_collect(request).await.unwrap();
+
+    let sent = server.requests();
+    let [auxiliary, primary] = sent.as_slice() else {
+        panic!("expected two requests")
+    };
+    assert_eq!(auxiliary.header("X-Session-Id"), Some("sideband-owner"));
+    assert_eq!(primary.header("X-Session-Id"), Some("main-owner"));
+    for request in [auxiliary, primary] {
+        assert_eq!(
+            request.body.as_ref().unwrap()["prompt_cache_key"],
+            "shared-prefix"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn submit_and_collect_returns_response() {
     let app = Router::new().route(
         "/v1/chat/completions",

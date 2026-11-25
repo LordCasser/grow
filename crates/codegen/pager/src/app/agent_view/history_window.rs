@@ -882,19 +882,7 @@ fn decode_tool(
     tool_id: &str,
     template: &SessionUpdate,
 ) -> Result<SessionUpdate, &'static str> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ToolPayload {
-        #[serde(default)]
-        content: Vec<acp_transport::protocol::ToolCallContent>,
-        #[serde(default)]
-        locations: Vec<acp_transport::protocol::ToolCallLocation>,
-        #[serde(default)]
-        raw_input: Option<serde_json::Value>,
-        #[serde(default)]
-        raw_output: Option<serde_json::Value>,
-    }
-    let payload: ToolPayload =
+    let payload: shell::extensions::notification::ToolOutputPayload =
         serde_json::from_str(json).map_err(|_| "tool fragment json is incomplete")?;
     let session = session_id_of(template).ok_or("tool fragment has no session")?;
     let call = acp_transport::protocol::ToolCall::new(
@@ -914,7 +902,8 @@ fn decode_tool(
     .content(payload.content)
     .locations(payload.locations)
     .raw_input(payload.raw_input)
-    .raw_output(payload.raw_output);
+    .raw_output(payload.raw_output)
+    .meta(payload.meta);
     Ok(SessionUpdate::Acp(Box::new(
         acp_transport::protocol::SessionNotification::new(
             session,

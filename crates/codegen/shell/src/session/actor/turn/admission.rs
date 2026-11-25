@@ -83,14 +83,15 @@ impl SessionActor {
                     == Some(crate::session::goal_tracker::GoalStatus::Active);
                 self.set_goal_loop_active(goal_loop_active);
             }
-            let round = self
-                .process_conversation_turn_with_recovery(
-                    prompt_id,
-                    origin.clone(),
-                    json_schema.clone(),
-                    std::mem::take(&mut step_already_started),
-                )
-                .await;
+            // The admission and prompt futures need not embed a complete sampling
+            // and compaction loop. Its heap allocation lives for this round.
+            let round = Box::pin(self.process_conversation_turn_with_recovery(
+                prompt_id,
+                origin.clone(),
+                json_schema.clone(),
+                std::mem::take(&mut step_already_started),
+            ))
+            .await;
             let restored_response = self.restored_response_for_stop_gate.borrow_mut().take();
             let restored_stop_gate = restored_response.filter(|identity| {
                 self.turn_continuation

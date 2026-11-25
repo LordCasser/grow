@@ -36,6 +36,27 @@ pub use sampling_types::ApiBackend;
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "grow-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
+const SESSION_ID_HEADER: &str = "x-session-id";
+
+tokio::task_local! {
+    static REQUEST_SESSION_ID: String;
+}
+
+/// Give every provider call in this Sideband operation the same transport identity.
+pub async fn with_sideband_session_id<F: Future>(id: &str, provider: F) -> F::Output {
+    REQUEST_SESSION_ID.scope(id.to_owned(), provider).await
+}
+
+async fn with_lineage_session_id<F: Future>(id: Option<String>, provider: F) -> F::Output {
+    // A Sideband may sample a projection carrying its parent conversation's owner.
+    if let Some(id) = id
+        && REQUEST_SESSION_ID.try_with(|_| ()).is_err()
+    {
+        REQUEST_SESSION_ID.scope(id, provider).await
+    } else {
+        provider.await
+    }
+}
 
 /// Deserialize a known Responses event. On completed/incomplete, rewrite
 /// `response.usage.total_tokens` in place to the live context length
@@ -1182,8 +1203,14 @@ impl SamplingClient {
             );
         }
         let sent_bearer = Self::sent_fragment_from_headers(&headers, &self.defaults.auth_scheme);
+        let mut builder = self.http.post(url);
+        if !headers.contains_key(SESSION_ID_HEADER)
+            && let Ok(id) = REQUEST_SESSION_ID.try_with(Clone::clone)
+        {
+            builder = builder.header(SESSION_ID_HEADER, id);
+        }
         SentRequest {
-            builder: self.http.post(url).headers(headers),
+            builder: builder.headers(headers),
             sent_bearer,
         }
     }
@@ -2265,8 +2292,8 @@ impl SamplingClient {
     )> {
         self.apply_conversation_defaults(&mut request)?;
 
-        let chat_request: ChatCompletionRequest = request.into();
-        self.chat_completion_stream(chat_request).await
+        let session_id = request.transport_session_id.take();
+        with_lineage_session_id(session_id, self.chat_completion_stream(request.into())).await
     }
 
     /// Send a conversation request using the Chat Completions API (non-streaming).
@@ -2278,8 +2305,8 @@ impl SamplingClient {
     ) -> Result<ChatCompletionResponse> {
         self.apply_conversation_defaults(&mut request)?;
 
-        let chat_request: ChatCompletionRequest = request.into();
-        self.chat_completion(chat_request).await
+        let session_id = request.transport_session_id.take();
+        with_lineage_session_id(session_id, self.chat_completion(request.into())).await
     }
 
     /// Send a conversation request using the Responses API (streaming).
@@ -2300,8 +2327,11 @@ impl SamplingClient {
         self.apply_conversation_defaults(&mut request)?;
 
         let responses_request: rs::CreateResponse = (&request).into();
-        self.create_response_stream(CreateResponseWrapper::new(responses_request))
-            .await
+        with_lineage_session_id(
+            request.transport_session_id,
+            self.create_response_stream(CreateResponseWrapper::new(responses_request)),
+        )
+        .await
     }
 
     /// Send a conversation request using the Responses API (non-streaming).
@@ -2317,7 +2347,7 @@ impl SamplingClient {
 
         let wrapper = CreateResponseWrapper::new(responses_request);
 
-        self.create_response(wrapper).await
+        with_lineage_session_id(request.transport_session_id, self.create_response(wrapper)).await
     }
 
     /// Send a conversation request using the Anthropic Messages API (streaming).
@@ -2333,7 +2363,11 @@ impl SamplingClient {
         self.apply_conversation_defaults(&mut request)?;
 
         let messages_request = build_messages_request(&request);
-        self.create_message_stream(messages_request).await
+        with_lineage_session_id(
+            request.transport_session_id,
+            self.create_message_stream(messages_request),
+        )
+        .await
     }
 
     /// Send a conversation request using the Anthropic Messages API (non-streaming).
@@ -2346,7 +2380,11 @@ impl SamplingClient {
         self.apply_conversation_defaults(&mut request)?;
 
         let messages_request = build_messages_request(&request);
-        self.create_message(messages_request).await
+        with_lineage_session_id(
+            request.transport_session_id,
+            self.create_message(messages_request),
+        )
+        .await
     }
 
     /// Backend-aware streaming call that collects the full response.

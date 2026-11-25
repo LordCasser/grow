@@ -9,6 +9,31 @@ pub mod e2e;
 pub mod legacy_comparison;
 pub mod synth;
 
+/// Reopen a test session and read the same indexed pages served to Pager.
+#[cfg(all(unix, feature = "test-support"))]
+pub async fn read_indexed_history_fixture(
+    root: &std::path::Path,
+    info: &crate::session::info::Info,
+) -> std::io::Result<Vec<Vec<crate::session::storage::HistoryRow>>> {
+    use crate::session::history::PagePosition;
+
+    let storage = crate::session::storage::JsonlStorageAdapter::with_root(root.to_owned());
+    let loaded = storage.resume_session_with_indexed_history(info).await?;
+    let prepared = loaded.history.prepare(&info.id, &loaded.timeline, None)?;
+    let pages = loaded
+        .history
+        .indexed_pages(prepared)?
+        .ok_or_else(|| std::io::Error::other("fixture has no indexed history"))?;
+    let mut result = Vec::new();
+    let mut before = Some(PagePosition::newest());
+    while let Some(position) = before {
+        let page = pages.read_before(&info.id, position)?;
+        result.push(page.rows);
+        before = page.older_position;
+    }
+    Ok(result)
+}
+
 /// Write a strict typed presentation fixture into the unified Timeline journal.
 ///
 /// This test-support helper rejects transient or unsupported notifications and

@@ -28,12 +28,27 @@ pub(crate) enum CompactFailure {
     /// Failure may resolve on retry. The caller follows its existing
     /// N-attempt + backoff loop.
     Transient(acp::Error),
+    /// Credentials, configuration, local sampling lifecycle, or a local compaction budget failed.
+    /// The summary cannot grant primary admission on the strength of this error.
+    Local {
+        error: acp::Error,
+        deterministic: bool,
+    },
     /// User/stop cancelled the in-flight compact. Do not retry or suppress AUTO.
     Cancelled,
 }
 /// Stable error payload for a user-cancelled compact (pager + retry loop).
 pub(crate) const COMPACT_CANCELLED_MSG: &str = "compact cancelled";
 impl CompactFailure {
+    fn wall_clock_budget(seconds: u64) -> Self {
+        Self::Local {
+            error: acp::Error::internal_error().data(format!(
+                "compact failed: exceeded wall-clock budget {seconds}s (runaway generation)"
+            )),
+            deterministic: false,
+        }
+    }
+
     pub(crate) fn cancelled_error() -> acp::Error {
         acp::Error::internal_error().data(COMPACT_CANCELLED_MSG)
     }
@@ -111,6 +126,13 @@ pub(crate) use sampling_types::is_context_length_error;
 /// 4xx API responses other than 408 and 429 are deterministic. Transport
 /// errors and 5xx responses are transient.
 fn classify_sampling_error(err: SamplingError, image_count: usize) -> CompactFailure {
+    if err.is_auth_error() {
+        return CompactFailure::Local {
+            error: acp::Error::internal_error()
+                .data(format!("compact failed: status 401 Unauthorized: {err}")),
+            deterministic: true,
+        };
+    }
     let acp_err = acp::Error::internal_error().data(format!("compact failed: {err}"));
     if let SamplingError::Api {
         status, message, ..
@@ -125,10 +147,19 @@ fn classify_sampling_error(err: SamplingError, image_count: usize) -> CompactFai
     }
     let deterministic = match &err {
         SamplingError::Auth { .. }
+        | SamplingError::Api {
+            status: StatusCode::PAYMENT_REQUIRED,
+            ..
+        }
         | SamplingError::InvalidConfiguration(_)
         | SamplingError::Persistence(_)
         | SamplingError::Serialization(_)
-        | SamplingError::Lifecycle(_) => true,
+        | SamplingError::Lifecycle(_) => {
+            return CompactFailure::Local {
+                error: acp_err,
+                deterministic: true,
+            };
+        }
         SamplingError::Api {
             status, message, ..
         } => {
@@ -167,30 +198,23 @@ fn classify_response_event_error(
     message: &str,
     image_count: usize,
 ) -> CompactFailure {
-    let acp_err = acp::Error::internal_error().data(match code {
-        Some(c) => format!("compact failed: {c}: {message}"),
-        None => format!("compact failed: {message}"),
-    });
-    let status_code = code
-        .and_then(|code| code.parse::<u16>().ok())
-        .or_else(|| matches!(code, Some("invalid_request_error")).then_some(400));
-    if sampling_types::is_unconditional_image_input_unsupported(status_code, message, image_count) {
-        return CompactFailure::ImageInputUnsupported(acp_err);
+    let mut error = SamplingError::from_stream_error(code.unwrap_or("error"), message);
+    if let SamplingError::Api { status, .. } = &mut error {
+        if let Some(numeric) = code
+            .and_then(|code| code.parse::<u16>().ok())
+            .and_then(|code| StatusCode::from_u16(code).ok())
+        {
+            *status = numeric;
+        }
+        if !matches!(
+            *status,
+            StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED
+        ) && message.contains("invalid_request_error")
+        {
+            *status = StatusCode::BAD_REQUEST;
+        }
     }
-    if matches!(code, Some("invalid_request_error")) || message.contains("invalid_request_error") {
-        return CompactFailure::Deterministic(acp_err);
-    }
-    if let Some(status_code) = code.and_then(|c| c.parse::<u16>().ok())
-        && (400..500).contains(&status_code)
-        && status_code != 408
-        && status_code != 429
-    {
-        return CompactFailure::Deterministic(acp_err);
-    }
-    if is_context_length_error(message) {
-        return CompactFailure::Deterministic(acp_err);
-    }
-    CompactFailure::Transient(acp_err)
+    classify_sampling_error(error, image_count)
 }
 /// Build the request Surface that will be sent to the compaction model.
 ///
@@ -478,16 +502,7 @@ pub(crate) async fn generate_session_compact(
                     }
                 };
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
-                    return Err(
-                        CompactFailure::Transient(
-                            acp::Error::internal_error()
-                                .data(
-                                    format!(
-                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                        ),
-                                ),
-                        ),
-                    );
+                    return Err(CompactFailure::wall_clock_budget(wall_clock_budget_secs));
                 }
                 match chunk_result {
                     Ok(chunk) => {
@@ -576,16 +591,7 @@ pub(crate) async fn generate_session_compact(
                     }
                 };
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
-                    return Err(
-                        CompactFailure::Transient(
-                            acp::Error::internal_error()
-                                .data(
-                                    format!(
-                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                        ),
-                                ),
-                        ),
-                    );
+                    return Err(CompactFailure::wall_clock_budget(wall_clock_budget_secs));
                 }
                 match chunk_result {
                     Ok(chunk) => {
@@ -728,16 +734,7 @@ pub(crate) async fn generate_session_compact(
                     }
                 };
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
-                    return Err(
-                        CompactFailure::Transient(
-                            acp::Error::internal_error()
-                                .data(
-                                    format!(
-                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                        ),
-                                ),
-                        ),
-                    );
+                    return Err(CompactFailure::wall_clock_budget(wall_clock_budget_secs));
                 }
                 match chunk_result {
                     Ok(event) => {
@@ -884,7 +881,12 @@ mod classify_tests {
     fn is_det(failure: &CompactFailure) -> bool {
         matches!(
             failure,
-            CompactFailure::Deterministic(_) | CompactFailure::ImageInputUnsupported(_)
+            CompactFailure::Deterministic(_)
+                | CompactFailure::ImageInputUnsupported(_)
+                | CompactFailure::Local {
+                    deterministic: true,
+                    ..
+                }
         )
     }
     #[test]
@@ -972,6 +974,25 @@ mod classify_tests {
         assert!(!det("500"));
         assert!(!det("503"));
     }
+    #[test]
+    fn preventive_summary_stream_auth_and_billing_failures_retain_account_authority() {
+        for (code, status) in [
+            ("authentication_error", "401"),
+            ("401", "401"),
+            ("insufficient_quota", "402"),
+            ("402", "402"),
+        ] {
+            let CompactFailure::Local {
+                error,
+                deterministic: true,
+            } = classify_response_event_error(Some(code), "invalid_request_error: denied", 0)
+            else {
+                panic!("{code} must keep the account-level rejection");
+            };
+            assert!(error.data.unwrap().as_str().unwrap().contains(status));
+        }
+    }
+
     #[test]
     fn response_event_unknown_code_defaults_to_transient() {
         assert!(!is_det(&classify_response_event_error(None, "msg", 0)));
@@ -1665,6 +1686,7 @@ mod reasoning_compaction_regression_tests {
             Err(
                 CompactFailure::Deterministic(_)
                 | CompactFailure::ImageInputUnsupported(_)
+                | CompactFailure::Local { .. }
                 | CompactFailure::Cancelled,
             ) => {
                 panic!(
@@ -1748,6 +1770,7 @@ mod reasoning_compaction_regression_tests {
             Err(
                 CompactFailure::Deterministic(_)
                 | CompactFailure::ImageInputUnsupported(_)
+                | CompactFailure::Local { .. }
                 | CompactFailure::Cancelled,
             ) => {
                 panic!("a stalled stream must be retryable (Transient), not Deterministic")
@@ -1828,6 +1851,7 @@ mod reasoning_compaction_regression_tests {
             Err(
                 CompactFailure::Deterministic(_)
                 | CompactFailure::ImageInputUnsupported(_)
+                | CompactFailure::Local { .. }
                 | CompactFailure::Cancelled,
             ) => {
                 panic!("a stalled stream must be retryable (Transient), not Deterministic")

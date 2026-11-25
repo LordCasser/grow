@@ -102,7 +102,7 @@ impl ChatStateActor {
         let mut added_items = Vec::with_capacity(skill_loads.len() + 1);
         added_items.push(item.clone());
         added_items.extend(skill_loads.iter().cloned().map(ConversationItem::SkillLoad));
-        let addition_tokens = super::state::estimate_conversation_tokens(&added_items);
+        let addition_tokens = super::state::estimate_projected_message_tokens(&added_items);
         if current_tokens.saturating_add(addition_tokens) > max_context_tokens {
             return Ok(ConditionalToolResultOutcome::RejectedHeadroom);
         }
@@ -410,13 +410,11 @@ impl ChatStateActor {
 
         let timeline = &self.state.timeline;
         let result_tokens = super::state::estimate_item_tokens(&item);
-        let accepted_items = vec![item.clone(), ConversationItem::SkillLoad(skill.clone())];
-        let accepted_tokens = super::state::estimate_conversation_tokens(&accepted_items);
         let current_tokens = self.state.projected_tokens;
         let outcome = if timeline.surface_revision() != expected_surface_revision {
             ConditionalToolResultOutcome::RejectedSurfaceChanged
         } else if result_tokens > max_result_tokens
-            || current_tokens.saturating_add(accepted_tokens) > max_context_tokens
+            || current_tokens.saturating_add(result_tokens) > max_context_tokens
         {
             ConditionalToolResultOutcome::RejectedHeadroom
         } else {
@@ -427,7 +425,7 @@ impl ChatStateActor {
         let event = if outcome == ConditionalToolResultOutcome::Accepted {
             candidate.prepare(crate::TimelineEventKind::Messages(crate::MessageEvent {
                 cause: MessageCause::SkillLoadModel,
-                items: accepted_items,
+                items: vec![item, ConversationItem::SkillLoad(skill)],
                 surface: crate::SurfaceOp::Append,
                 response_admission: None,
             }))?

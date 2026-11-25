@@ -749,9 +749,12 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         step_already_started: bool,
     ) -> Result<TurnOutcome, acp::Error> {
-        let mut result = self
-            .process_conversation_turn(req_id, &origin, json_schema.clone(), step_already_started)
-            .await;
+        // Each attempt owns a full Step loop. Pin it separately so the
+        // recovery future can carry it without reserving its stack space.
+        let run_turn = |schema, started| {
+            Box::pin(self.process_conversation_turn(req_id, &origin, schema, started))
+        };
+        let mut result = run_turn(json_schema.clone(), step_already_started).await;
         let mut attempt = 0u32;
         let mut recovery_key = None;
         let mut delay_satisfied_for = None;
@@ -871,9 +874,7 @@ impl SessionActor {
                 if !self.start_step_after_control_boundary(req_id, None).await {
                     return result;
                 }
-                result = self
-                    .process_conversation_turn(req_id, &origin, json_schema.clone(), true)
-                    .await;
+                result = run_turn(json_schema.clone(), true).await;
                 continue;
             }
             if matches!(result, Ok(TurnOutcome::Completed { .. })) && result_precedes_current_agent
@@ -1009,9 +1010,7 @@ impl SessionActor {
             if !recovery_step_started {
                 return result;
             }
-            result = self
-                .process_conversation_turn(req_id, &origin, None, true)
-                .await;
+            result = run_turn(None, true).await;
             delay_satisfied_for = None;
             result_precedes_current_agent = false;
         }
@@ -1575,6 +1574,7 @@ impl SessionActor {
             } else {
                 let using_prestarted_step = std::mem::take(&mut step_already_started);
                 let mut tools_changed_for_step = false;
+                let mut compaction_handled = false;
                 if !using_prestarted_step {
                     let control_boundary =
                         if self.events.next_step_index() == 0 && !self.events.has_active_step() {
@@ -1686,8 +1686,9 @@ impl SessionActor {
                         image_projection_retries = 0;
                         model_fingerprint = None;
                     }
+                    compaction_handled = pending_forced_compaction.is_some();
                     if let Some(trigger_info) = pending_forced_compaction.take()
-                        && let Err(e) = self.run_compact_only(trigger_info).await
+                        && let Err(e) = Box::pin(self.run_compact_only(trigger_info)).await
                     {
                         tracing::error!(error = %e, "Between-step compaction failed");
                         if Self::is_auth_compact_error(&e) {
@@ -1696,6 +1697,7 @@ impl SessionActor {
                         return Err(e);
                     }
                     let async_compaction_applied = self.background_compaction_boundary().await?;
+                    compaction_handled |= async_compaction_applied;
                     tools_changed_for_step = async_compaction_applied;
                     if model_changed || agent_changed {
                         // The request projection epoch changed. A provider
@@ -1994,6 +1996,9 @@ impl SessionActor {
                     && let Some(trigger_info) = self
                         .check_auto_compact_needed(request.max_output_tokens)
                         .await
+                    // A protected tail may keep preventive pressure high across a rebuild.
+                    // Give the current request its admission check after one maintenance pass.
+                    && !(compaction_handled && trigger_info.is_preventive())
                 {
                     // This request projection is complete even though its pressure
                     // requires a synchronous compaction before provider admission.

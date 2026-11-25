@@ -3055,26 +3055,34 @@ fn skill_call_to_block(tc: &acp::ToolCall) -> RenderBlock {
         .as_ref()
         .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("Dynamic"))
         .and_then(|value| value.get("value"));
-    let raw_status = serde_json::to_value(tc.status)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned));
-    let status = match raw_status.as_deref() {
-        Some("completed") => SkillDisplayStatus::Loaded,
-        Some("failed") => SkillDisplayStatus::Failed,
-        Some("cancelled" | "canceled") => SkillDisplayStatus::Cancelled,
+    let failure = tc.raw_output.as_ref();
+    let status = match tc.status {
+        acp::ToolCallStatus::Completed => SkillDisplayStatus::Loaded,
+        acp::ToolCallStatus::Failed
+            if failure.and_then(|value| value["error"].as_str())
+                == Some("skill_group_not_published") =>
+        {
+            SkillDisplayStatus::Cancelled
+        }
+        acp::ToolCallStatus::Failed => SkillDisplayStatus::Failed,
         _ => SkillDisplayStatus::Loading,
     };
-    let error = matches!(
-        status,
-        SkillDisplayStatus::Failed | SkillDisplayStatus::Cancelled
-    )
-    .then(|| content_text(tc))
-    .filter(|text| !text.is_empty());
+    let error = match status {
+        SkillDisplayStatus::Failed | SkillDisplayStatus::Cancelled => failure
+            .and_then(|value| value["message"].as_str())
+            .filter(|message| !message.is_empty())
+            .map(str::to_owned)
+            .or_else(|| Some(content_text(tc)).filter(|text| !text.is_empty())),
+        _ => None,
+    };
     RenderBlock::ToolCall(ToolCallBlock::skill_call(
-        output
-            .and_then(|value| value.get("skill_name"))
+        input
+            .and_then(|value| value.get("name"))
             .and_then(serde_json::Value::as_str)
-            .or_else(|| input.and_then(|value| value.get("name"))?.as_str()),
+            .or_else(|| output.and_then(|value| value.get("skill_name"))?.as_str()),
+        input
+            .and_then(|value| value.get("resource"))
+            .and_then(serde_json::Value::as_str),
         output
             .and_then(|value| value.get("args"))
             .and_then(serde_json::Value::as_str)
@@ -3775,11 +3783,13 @@ mod tests {
         let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("skill")), "load_skill")
             .kind(acp::ToolKind::Other)
             .status(acp::ToolCallStatus::Completed)
-            .raw_input(Some(serde_json::json!({"name":"commit","args":"--amend"})))
+            .raw_input(Some(
+                serde_json::json!({"name":"user:commit","args":"--amend"}),
+            ))
             .raw_output(Some(
                 serde_json::to_value(tools::types::output::ToolOutput::from(
                     tools::implementations::grow_build::load_skill::LoadSkillOutput {
-                        skill_name: "user:commit".into(),
+                        skill_name: "commit".into(),
                         source: "/skills/commit/SKILL.md".into(),
                         args: "--amend".into(),
                         prepared_body: "Do the commit safely.".into(),
@@ -3803,6 +3813,126 @@ mod tests {
             block.output.as_deref(),
             Some("Source: /skills/commit/SKILL.md\n\nPrepared body:\nDo the commit safely.")
         );
+    }
+
+    #[test]
+    fn collapsed_skill_rows_identify_the_requested_resource_across_updates() {
+        use crate::scrollback::DisplayMode;
+        use serde_json::json;
+
+        let mut meta = acp::Meta::new();
+        meta.insert("grow/tool".into(), json!({"kind": "skill"}));
+        for resource in [
+            None,
+            Some("references/handoffs.md"),
+            Some("examples/handoffs.md"),
+        ] {
+            let mut input = json!({"name": "software-engineering"});
+            let mut title = "Skill software-engineering".to_owned();
+            if let Some(path) = resource {
+                input["resource"] = json!(path);
+                title.push_str(&format!(" · {path}"));
+            }
+            let call = acp::ToolCall::new("skill-1", "load_skill")
+                .status(acp::ToolCallStatus::InProgress)
+                .raw_input(Some(input))
+                .meta(Some(meta.clone()));
+            let completed = merge_tool_call_update(
+                call.clone(),
+                acp::ToolCallUpdate::new(
+                    call.tool_call_id.clone(),
+                    acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed),
+                ),
+            );
+            for (call, status) in [(&call, "Loading"), (&completed, "Loaded")] {
+                let mut entry = ScrollbackEntry::new(tool_call_to_block(call, None))
+                    .with_display_mode(DisplayMode::Collapsed);
+                let lines = &entry.output(80, &Default::default(), None).lines;
+                assert_eq!(lines.len(), 1);
+                assert!(
+                    lines[0]
+                        .content
+                        .to_string()
+                        .ends_with(&format!("{title}  {status}"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_skill_rows_keep_qualified_names_resource_suffixes_and_outcomes() {
+        use crate::scrollback::DisplayMode;
+        use serde_json::json;
+
+        for (name, file, terminal, raw_output, label, reason) in [
+            (
+                "user:guide",
+                Some("first.md"),
+                acp::ToolCallStatus::Completed,
+                json!({"type":"Dynamic","value":{"skill_name":"guide"}}),
+                "Loaded",
+                None,
+            ),
+            (
+                "review:guide",
+                Some("second.md"),
+                acp::ToolCallStatus::Failed,
+                json!({"error":"skill_not_loaded","message":"Resource loads do not accept args"}),
+                "Failed",
+                Some("Resource loads do not accept args"),
+            ),
+            (
+                "review:guide",
+                None,
+                acp::ToolCallStatus::Failed,
+                json!({"error":"skill_group_not_published"}),
+                "Cancelled",
+                Some("The skill group was not published."),
+            ),
+        ] {
+            let mut input = json!({"name":name});
+            let mut title = format!("Skill: {name}");
+            if let Some(file) = file {
+                let resource =
+                    format!("references/共享/architecture/implementation/guidelines/{file}");
+                title.push_str(&format!(" · {resource}"));
+                input["resource"] = json!(resource);
+            }
+            if label == "Failed" {
+                input["args"] = json!("--invalid");
+            }
+            let call = acp::ToolCall::new("skill", "load_skill")
+                .meta(json!({"grow/tool":{"kind":"skill"}}).as_object().cloned())
+                .raw_input(Some(input))
+                .status(terminal)
+                .raw_output(Some(raw_output));
+            let block = tool_call_to_block(&call, None);
+            let RenderBlock::ToolCall(ToolCallBlock::Skill(skill)) = &block else {
+                panic!("expected an explicit Skill");
+            };
+            assert_eq!(skill.name, title);
+            assert_eq!(skill.error.as_deref(), reason);
+            for mode in [DisplayMode::Collapsed, DisplayMode::Truncated] {
+                let mut entry = ScrollbackEntry::new(block.clone()).with_display_mode(mode);
+                let output = entry.output(64, &Default::default(), None);
+                let header = &output.lines[0].content;
+                assert!(header.width() <= 64);
+                let header = header.to_string();
+                assert!(header.contains(name) && header.ends_with(label), "{header}");
+                if let Some(file) = file {
+                    assert!(header.contains(file), "{header}");
+                }
+                if let (DisplayMode::Truncated, Some(reason)) = (mode, reason) {
+                    assert!(
+                        output
+                            .lines
+                            .iter()
+                            .skip(1)
+                            .any(|line| line.content.to_string().contains(reason))
+                    );
+                }
+            }
+        }
     }
 
     #[test]

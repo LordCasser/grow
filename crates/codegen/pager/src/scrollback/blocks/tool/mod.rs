@@ -219,6 +219,11 @@ macro_rules! delegate_tool {
 impl BlockContent for ToolCallBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         // Bullet prepending is handled by RenderBlock::output() via has_bullet().
+        if let Self::Skill(block) = self
+            && ctx.mode != DisplayMode::Expanded
+        {
+            return block.skill_output(ctx);
+        }
         delegate_tool!(self, output(ctx))
     }
 
@@ -305,9 +310,10 @@ impl BlockContent for ToolCallBlock {
 impl ToolCallBlock {
     /// Project the structured `grow/load_skill` input and output into the
     /// expandable skill row. Skill identity comes from the tool kind; the
-    /// name, arguments, source and prepared body come only from protocol data.
+    /// name, resource, arguments, source and prepared body come from protocol data.
     pub(crate) fn skill_call(
         name: Option<&str>,
+        resource: Option<&str>,
         args: Option<&str>,
         source: Option<&str>,
         prepared_body: Option<&str>,
@@ -315,7 +321,11 @@ impl ToolCallBlock {
         error: Option<String>,
     ) -> Self {
         let name = name.filter(|name| !name.trim().is_empty());
-        let title = name.map_or_else(|| "Skill".to_owned(), |name| format!("Skill: {name}"));
+        let mut title = name.map_or_else(|| "Skill".to_owned(), |name| format!("Skill: {name}"));
+        if let Some(resource) = resource.filter(|path| !path.is_empty()) {
+            title.push_str(" · ");
+            title.push_str(resource);
+        }
         let mut summary = status.label().to_owned();
         if let Some(args) = args.filter(|args| !args.is_empty()) {
             summary.push_str(" · args: ");
@@ -339,7 +349,8 @@ impl ToolCallBlock {
                 block.error = Some(error.unwrap_or_else(|| "Skill load failed".into()));
             }
             SkillDisplayStatus::Cancelled => {
-                block.error = Some(error.unwrap_or_else(|| "Skill load cancelled".into()));
+                block.error =
+                    Some(error.unwrap_or_else(|| "The skill group was not published.".into()));
             }
             SkillDisplayStatus::Loading | SkillDisplayStatus::Loaded => {
                 if let Some(error) = error {
@@ -636,6 +647,7 @@ mod tests {
         for (status, label, success) in cases {
             let ToolCallBlock::Skill(block) = ToolCallBlock::skill_call(
                 Some("user:commit"),
+                None,
                 Some("--amend"),
                 Some("/skills/commit/SKILL.md"),
                 Some("prepared"),

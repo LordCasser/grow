@@ -1,5 +1,6 @@
 //! Disk-backed byte pages for oversized Tool display payloads.
 
+use crate::extensions::notification::ToolOutputPayload;
 use acp_transport::protocol as acp;
 use redb::{ReadTransaction, ReadableTable, TableDefinition, WriteTransaction};
 use serde::{Deserialize, Serialize};
@@ -25,15 +26,6 @@ pub(super) struct Header {
     total_bytes: u64,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Body<'a> {
-    content: &'a [acp::ToolCallContent],
-    locations: &'a [acp::ToolCallLocation],
-    raw_input: &'a Option<serde_json::Value>,
-    raw_output: &'a Option<serde_json::Value>,
-}
-
 pub(super) fn initialize(tx: &WriteTransaction) -> io::Result<()> {
     tx.open_table(TOOL_FRAGMENTS).map_err(io::Error::other)?;
     tx.open_table(TOOL_FRAGMENT_CHUNKS)
@@ -48,13 +40,14 @@ pub(super) fn publish(
     tx: &WriteTransaction,
     source_position: u64,
     at_ms: i64,
-    call: &acp::ToolCall,
+    call: acp::ToolCall,
 ) -> io::Result<bool> {
-    let json = serde_json::to_string(&Body {
-        content: &call.content,
-        locations: &call.locations,
-        raw_input: &call.raw_input,
-        raw_output: &call.raw_output,
+    let json = serde_json::to_string(&ToolOutputPayload {
+        content: call.content,
+        locations: call.locations,
+        raw_input: call.raw_input,
+        raw_output: call.raw_output,
+        meta: call.meta,
     })?;
     if json.len() <= INLINE_BODY_BYTES {
         return Ok(false);
@@ -78,10 +71,10 @@ pub(super) fn publish(
     drop(chunks);
 
     let header = Header {
-        tool_call_id: call.tool_call_id.clone(),
+        tool_call_id: call.tool_call_id,
         source_position,
         digest,
-        title: call.title.clone(),
+        title: call.title,
         kind: call.kind,
         status: call.status,
         at_ms,
@@ -256,7 +249,7 @@ mod tests {
             .status(acp::ToolCallStatus::Completed)
             .raw_output(Some(serde_json::json!({"text": body})));
         let mut tx = db.begin_write().unwrap();
-        assert!(publish(&tx, 42, 123, &call).unwrap());
+        assert!(publish(&tx, 42, 123, call).unwrap());
         tx.commit().unwrap();
 
         let tx = db.begin_read().unwrap();

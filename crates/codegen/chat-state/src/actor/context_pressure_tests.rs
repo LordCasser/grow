@@ -10,6 +10,52 @@ async fn effective_request_tokens(handle: &crate::handle::ChatStateHandle) -> u6
     crate::estimate_request_input_tokens(&request)
 }
 
+#[tokio::test]
+async fn skill_pressure_counts_only_the_body_sent_by_each_adapter() {
+    use sampling_types::{ApiBackend, SkillLoadSource, ToolCall};
+
+    let user = user_skill_load("input", 0, "user-call", "guide", "user-prepared-body");
+    let mut model = user_skill_load("model:call", 0, "call", "guide", "model-prepared-body");
+    model.source = SkillLoadSource::Model;
+    let full_result = sampling_types::skill_load_result_content(&model);
+    for (result, model_bodies) in [(full_result.as_str(), 1), ("[tool output pruned]", 0)] {
+        let mut items = vec![
+            ConversationItem::user("load guides"),
+            ConversationItem::SkillLoad(user.clone()),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call".into(),
+                name: "load_skill".into(),
+                arguments: r#"{"name":"guide"}"#.into(),
+            }]),
+            ConversationItem::tool_result("call", result),
+        ];
+        let expected = crate::estimate_conversation_tokens(&items);
+        items.push(ConversationItem::SkillLoad(model.clone()));
+        let h = TestHarness::with_config(items, test_config_with_window(1_000));
+        let request = h
+            .handle
+            .build_request("skill-pressure", vec![], None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(crate::estimate_request_input_tokens(&request), expected);
+        let pressure = h.handle.check_auto_compact_needed(1).await.unwrap();
+        assert_eq!(pressure.portable_history_tokens, expected);
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let wire = wire_request_json(&request, &backend).to_string();
+            assert_eq!(wire.matches("user-prepared-body").count(), 1, "{backend:?}");
+            assert_eq!(
+                wire.matches("model-prepared-body").count(),
+                model_bodies,
+                "{backend:?}"
+            );
+        }
+    }
+}
+
 fn goal_pressure_items() -> (Vec<ConversationItem>, sampling_types::GoalDirectiveTag) {
     let active = sampling_types::GoalDirectiveTag {
         goal_id: "pressure-goal".into(),
@@ -45,6 +91,46 @@ fn projected_goal_tokens(
     let projected =
         sampling_types::project_conversation_for_goal_scope(items.to_vec(), Some(active));
     crate::estimate_conversation_tokens(&projected)
+}
+
+#[tokio::test]
+async fn preventive_compaction_counts_only_goal_scoped_portable_messages() {
+    let (mut items, active) = goal_pressure_items();
+    items.push(ConversationItem::Reasoning(
+        sampling_types::synthesized_reasoning_item("r".repeat(80_000)),
+    ));
+    items.push(ConversationItem::assistant("done"));
+    let h = TestHarness::with_config(items, test_config_with_window(10_000));
+
+    for scope in [Some(active.clone()), None] {
+        let request = h
+            .handle
+            .build_request_for_image_mode(
+                "replay-pressure",
+                vec![],
+                None,
+                Some("runtime".repeat(10_000)),
+                scope.clone(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(crate::estimate_request_input_tokens(&request) > 10_000);
+        h.handle.record_provider_context_anchor(1_000);
+        let pressure = h.handle.check_auto_compact_needed(85).await;
+        if scope.is_some() {
+            let pressure = pressure.expect("the active Goal alone reaches the threshold");
+            assert_eq!(pressure.projected_tokens, 1_000);
+            assert!(pressure.portable_history_tokens > 10_000);
+        } else {
+            assert!(
+                pressure.is_none(),
+                "shadowed Goals, omitted reasoning and request-only context do not consume replay headroom"
+            );
+        }
+        assert_eq!(h.handle.get_projected_tokens().await, 1_000);
+    }
 }
 
 async fn assert_goal_route_rebase(

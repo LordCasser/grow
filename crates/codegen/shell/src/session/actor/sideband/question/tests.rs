@@ -77,14 +77,9 @@ fn question_budget_drops_tool_batch_with_its_skill_metadata() {
         serde_json::to_value(portable).unwrap()
     );
 
-    // The two skill facts could fit on their own. The batch nevertheless must
-    // leave together once the assistant and its result no longer fit.
-    let limit = [0, 3, 5, 6, 7]
-        .into_iter()
-        .map(|index| chat_state::estimate_item_tokens(&snapshot.surface[index]))
-        .sum::<u64>()
-        + chat_state::estimate_item_tokens(&question);
-    assert!(limit < full);
+    // Even a one-token deficit drops the whole batch, including its
+    // zero-cost model Skill facts. Both system instructions remain.
+    let limit = full - 1;
     let selected =
         FrozenQuestion::select(&snapshot, prompt.into(), "test-model".into(), limit).unwrap();
     assert_eq!(selected.context_ids, [ids[0], ids[6], ids[7]]);

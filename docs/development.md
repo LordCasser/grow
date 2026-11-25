@@ -697,6 +697,8 @@ MCP 工具的模型路径把 `structuredContent` 与 text/resource 描述投成�
 
 Skill discovery 在 Agent 构建时生成唯一 `SkillManager` 目录，模型目录只展示名称及简短描述，不提供安装路径或提前加载完整正文。使用技能必须调用 `load_skill(name, args)`；必要时再调用 `load_skill(name, resource="references/api.md")` 读取一个包内 UTF-8 资源，resource 不与 args 混用、不替换模板、不执行脚本。资源经过实际文件路径的授权、1 MiB 上限、取消和既有 durable SkillLoad 发布；加载后的资料保持原文与来源身份。名称先解析再判定资格，禁用、缺失或不可调用明确返回无法加载，不通过同名条目、Read、Shell 或另一副本绕过。Agent 的 `skills:` 初始化依赖无法满足时明确构建失败，已预加载技能仍保留目录身份以读取后续资料。普通文件编辑与审阅仍不等于技能激活。契约见 [按需资源加载](../openspec/specs/extension-runtime/spec.md#requirement-skill-resources-load-progressively-through-the-same-tool) 与 [初始化依赖](../openspec/specs/configuration-rules/spec.md#requirement-agent-skill-preloading-respects-disabled-entries)。
 
+Pager 的折叠 Skill 行显示调用时选择的限定名、资源和终态，例如 `Skill software-engineering · references/handoffs.md  Loaded`。窄屏优先保留状态和资源路径末段。展开失败行可读到加载器返回的原因。大型工具输出分页时，ACP 的 `_meta` 随正文分片，完整恢复后沿用实时行的投影。见[技能行与历史分页](../openspec/specs/client-surfaces/spec.md#requirement-skill-identity-and-terminal-status-survive-width-changes-and-history-paging)。
+
 视觉辅助请求只有图片和固定英文识图 prompt，不带图片所在消息的文字、当前任务、Skill 或会话历史；Sideband 来源引用只用于本地证据与恢复。新 prompt 的缓存身份与已完成 Sideband 恢复一致，不复用旧 prompt 的结果。识图与 OCR 结果保留原语言。只有存在待处理图片时才创建普通操作行；视觉调用、OCR、转换数量或失败在同一行更新，固定文案使用英语。该行绑定 prompt，复用回合终态的身份校验；活跃重连保留动效，离线截点缺少终态时标记 incomplete。见 [视觉辅助契约](../openspec/specs/model-sampling/spec.md) 与 [图片操作行](../openspec/specs/client-surfaces/spec.md#requirement-image-recovery-is-one-visible-operation-row)。
 
 图片工具与关联 response carrier 的内部投影不生成 assistant 技术占位正文；派生模型请求（含直接 Chat 压缩请求）和子 Agent 背景清理两种历史完整保留值。normal/minimal/子 Agent 的共用 assistant 块在流式起始前缀尚无法判别时短暂缓存，精确占位消息不进入展示、搜索和复制，普通解释原样释放。原始 Timeline 与 provider evidence 保留，历史正文由同一 admission 派生，`Converted 1 image` 等操作行继续使用原有入口。见 [模型投影契约](../openspec/specs/model-sampling/spec.md#requirement-internal-image-projection-status-is-not-assistant-speech) 和 [TUI 占位过滤](../openspec/specs/client-surfaces/spec.md#requirement-tui-omits-complete-internal-image-projection-placeholders)。
@@ -839,9 +841,13 @@ Agent 消息的历史展示保留原物理锚点，无锚点时使用原回执�
 
 Responses 下用户主动加载的技能以独立 user 上下文传入，保留结构化来源、加载身份及完整正文；不再生成需要模型 reasoning 的模拟 `load_skill` 调用。真实模型技能调用仍使用原工具往返。排查 thinking `reasoning_text` 400 时，应区分历史 reasoning 缺失与 Runtime 事实被错误编码成模型调用。见 [技能请求投影](../openspec/specs/model-sampling/spec.md#requirement-runtime-skill-results-have-legal-provider-projections)。
 
-技能发布的 headroom 检查沿用 ChatState 的 `projected_tokens`，与状态栏、请求投影和普通上下文压力检查保持同一口径，再计入完整新增内容。不要用原始 Surface 的 bytes/4 总量替换现有计数：原始历史含可能不随请求发送的 reasoning，也不包含完整 provider envelope 开销。见 [技能发布预算计数](../openspec/specs/model-sampling/spec.md#requirement-skill-publication-uses-projected-request-context-pressure)。
+Skill 发布、实时请求和冷回放都按发送给模型的内容估值。模型调用的正文由配对的 ToolResult 提供，剪裁后只计剩余结果。用户显式加载的 Skill 单独携带正文。Timeline 保留原始加载事实供展示、因果保护和原始历史诊断使用。发布前还要核对已有请求的提供方校准值、输出预留和 Surface 版本。见[技能发布预算](../openspec/specs/model-sampling/spec.md#requirement-skill-publication-uses-projected-request-context-pressure)。
 
 冷恢复会重建 native continuation lane，初始上下文压力按现有 portable replay 的消息贡献估算，计数始终使用有效请求估值，不减去原始 Surface 的差分。后续请求计入当前工具和 schema 等 envelope，并保留同一路由的 provider 校准状态；恢复估值不复用旧 live anchor，也不截到窗口上限。见 [冷恢复上下文计数](../openspec/specs/model-sampling/spec.md#requirement-cold-context-pressure-follows-portable-replay)。
+
+普通会话运行期间，自动压缩也会检查当前 Goal 下冷恢复需要重放的消息。即使提供方回报的上下文很小，已经积累的大量工具结果仍能触发后台压缩，达到同步阈值时可提升同一份摘要。排查恢复时的计数跳变，可以比较挂起前后的 Surface 项数、主请求体字节数、提供方回执和首条 `contextUsedTokens`。已落盘的超窗历史在首次恢复时仍走既有压缩流程。见 [可重放历史的压缩阈值](../openspec/specs/context-compaction/spec.md#requirement-automatic-compaction-maintains-room-for-portable-replay)。
+
+预防性摘要在实际可替换的选区内检查进展。后续工具 Step 的新结果仍在保留尾部时，只剩旧摘要的选区跳过本次生成。旧摘要与新的可替换证据可以一起滚动合并。预防性摘要的提供方调用失败时，Shell 记录失败，重新按完整输入和显式输出预留检查主请求。只有正常准入仍通过，主采样才继续。硬超窗恢复、取消、预算拒绝及持久化失败沿各自的错误路径处理。见[预防性摘要和主请求准入](../openspec/specs/context-compaction/spec.md#requirement-preventive-summaries-make-progress-and-preserve-primary-admission)。
 
 resident 会话的 rewind 在 Timeline durable ACK 后、真实采样路由替换在切换后，同样按新 lane 的 portable replay 重建压力和请求估值基线，并立即通知状态栏。跨压缩 rewind 恢复的原始 reasoning 继续保存在历史中，只有当前 replay 规则实际发送的部分计入压力；普通参数更新和 compaction 保留同一路由的校准状态；replacement、prune、图片投影与 native reset 后重新估算实际回放内容，重复 request build 不重复调整。见 [rewind 与路由切换计数](../openspec/specs/model-sampling/spec.md#requirement-rewind-and-route-replacement-rebase-context-pressure-to-portable-replay)。
 
@@ -922,6 +928,8 @@ Session列表的typed时间排序与延后行构建局部测量见 [S3验证](..
 图片预算缓存复用已保存Surface前缀中的item/part offset，校验SourceId与Weak身份；定位内核验证和测量见[C1记录](../openspec/changes/archive/2026-11-03-reuse-image-budget-choice-offsets/verification.md)，不代表整request/provider提速。正式图片预算契约仍在[model-sampling](../openspec/specs/model-sampling/spec.md#requirement-image-budget-choices-follow-their-request-projection-lifetime)。
 
 Prompt cache key 的 rewind 锚点由 Timeline accepted-event fold 派生；prepare、拒绝和未确认写入不发布锚点，cold replay重建，key组成不变。[算法验证](../openspec/changes/archive/2026-11-03-cache-last-rewind-anchor/verification.md)。
+
+普通采样由 ChatState 按 Timeline 分支生成传输会话身份，Sampler 将它写入 `X-Session-Id`。追加与重试沿用当前身份，冷恢复、fork 或 rewind 后使用新分支的身份。Sideband 使用本次操作的 UUID，显式路由头优先。供应商前缀缓存由独立字段 `prompt_cache_key` 控制，独立会话可以共享它。排查冷恢复时，先核对 Grow 首包中的摘要和工具交换，再核对网关最终渲染的提示。部分有状态网关按独立的首包字节预算裁剪历史。见[传输会话隔离](../openspec/specs/model-sampling/spec.md#requirement-stateful-sampling-transports-distinguish-independent-conversations)。
 
 单文件 hunk 查询在本次调用中共用 baseline/current 行表，单 hunk API和patch字节不变；不跨查询缓存。[差分与测量](../openspec/changes/archive/2026-11-03-reuse-file-line-tables-for-hunk-patches/verification.md)。
 

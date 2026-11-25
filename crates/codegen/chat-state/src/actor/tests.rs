@@ -9480,6 +9480,9 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
         .await
         .unwrap();
     let first_key = first.prompt_cache_key.expect("normal requests need a key");
+    let owner = first
+        .transport_session_id
+        .expect("the timeline owns the request");
 
     h.handle
         .push_assistant_response(ConversationItem::assistant("a1"));
@@ -9495,6 +9498,10 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
         Some(first_key.as_str()),
         "ordinary appends stay on one cache lineage"
     );
+    assert_eq!(
+        appended.transport_session_id.as_deref(),
+        Some(owner.as_str())
+    );
 
     h.handle.replace_sampling_route(SamplingConfig {
         model: "other-model".into(),
@@ -9509,6 +9516,10 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
         other_model.prompt_cache_key.as_deref(),
         Some(first_key.as_str())
     );
+    assert_ne!(
+        other_model.transport_session_id.as_deref(),
+        Some(owner.as_str())
+    );
 
     h.handle.replace_sampling_route(test_config());
     h.handle.rewind_durably(1).await.unwrap();
@@ -9521,6 +9532,10 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
         rewound.prompt_cache_key.as_deref(),
         Some(first_key.as_str())
     );
+    assert_ne!(
+        rewound.transport_session_id.as_deref(),
+        Some(owner.as_str())
+    );
 
     let fork = h
         .handle
@@ -9528,6 +9543,83 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
         .await
         .unwrap();
     assert_ne!(fork.prompt_cache_key, rewound.prompt_cache_key);
+    assert_ne!(fork.transport_session_id, rewound.transport_session_id);
+}
+
+#[tokio::test]
+async fn cold_lane_replays_the_committed_summary_goal_and_recent_tool_exchange() {
+    use sampling_types::{ApiBackend, ToolCall};
+
+    const GOAL: &str = "Publish the signed compatibility report.";
+    const EVIDENCE: &str = "Compatibility check passed on 27 targets.";
+    let config = SamplingConfig {
+        api_backend: ApiBackend::Messages,
+        ..test_config()
+    };
+    let live = TestHarness::with_config(
+        vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("superseded investigation"),
+        ],
+        config.clone(),
+    );
+    commit_compaction_range(&live.handle, vec![ConversationItem::user_meta(GOAL)]).await;
+    live.handle
+        .push_response_durably(
+            vec![ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "toolu_recent".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"report-results.txt"}"#.into(),
+            }])],
+            None,
+        )
+        .await
+        .unwrap();
+    live.handle
+        .push_tool_result_durably(ConversationItem::tool_result("toolu_recent", EVIDENCE))
+        .await
+        .unwrap();
+    let prior = live
+        .handle
+        .build_request("test-timeline", vec![], None, None, None)
+        .await
+        .unwrap();
+    let (persistence, _records) = MockTimelinePersistence::new();
+    let (events, _events_rx) = mpsc::unbounded_channel();
+    let cold = ChatStateActor::spawn_from_timeline(
+        live.handle.timeline_events().await.unwrap(),
+        config,
+        Box::new(persistence),
+        events,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let request = cold
+        .build_request("test-timeline", vec![], None, None, None)
+        .await
+        .unwrap();
+    let owner = request.transport_session_id.as_deref().unwrap();
+    assert_ne!(owner, prior.transport_session_id.as_deref().unwrap());
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Messages,
+        ApiBackend::Responses,
+    ] {
+        let wire = wire_request_json(&request, &backend).to_string();
+        for retained in [GOAL, "report-results.txt", EVIDENCE] {
+            assert_eq!(wire.matches(retained).count(), 1, "{backend:?}: {retained}");
+        }
+        assert!(!wire.contains("superseded investigation"));
+    }
+    cold.push_user_message_durably(ConversationItem::user("continue"))
+        .await
+        .unwrap();
+    let next = cold
+        .build_request("test-timeline", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(next.transport_session_id.as_deref(), Some(owner));
 }
 
 /// Synthetic user messages (doom loop warning, auto-continue) are
@@ -13093,7 +13185,8 @@ async fn user_skill_publication_uses_projected_headroom() {
 #[tokio::test]
 async fn model_skill_publication_uses_projected_headroom() {
     for (reasoning_bytes, provider_tokens, expected) in [
-        (80_000, 5_313, crate::ConditionalToolResultOutcome::Accepted),
+        // Only the real result fits the remaining headroom.
+        (80_000, 7_350, crate::ConditionalToolResultOutcome::Accepted),
         (
             0,
             7_900,
@@ -13121,10 +13214,7 @@ async fn model_skill_publication_uses_projected_headroom() {
             call_id,
             sampling_types::skill_load_result_content(&skill),
         );
-        let added_tokens = crate::estimate_conversation_tokens(&[
-            result.clone(),
-            ConversationItem::SkillLoad(skill.clone()),
-        ]);
+        let added_tokens = crate::estimate_item_tokens(&result);
         let revision = h.handle.get_surface_revision().await.unwrap();
         h.handle.record_provider_context_anchor(provider_tokens);
         assert_eq!(h.handle.get_projected_tokens().await, provider_tokens);
@@ -13526,7 +13616,10 @@ async fn unconsumed_model_skill_is_pinned_then_settled_once_without_branch_reviv
 
 #[tokio::test]
 async fn materialization_pins_skill_until_canonical_response_not_raw_or_summary() {
-    let h = TestHarness::with_conversation(vec![ConversationItem::system("system")]);
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("system"),
+        marked_user("review with the selected skill", 0),
+    ]);
     let turn = crate::TurnId(958);
     let call_id = "materialized-skill";
     seed_admitted_load_skill_call(&h.handle, turn, call_id, r#"{"name":"review","args":""}"#).await;
@@ -13671,7 +13764,8 @@ async fn materialization_pins_skill_until_canonical_response_not_raw_or_summary(
         1,
     )
     .expect("the consumed load returns to ordinary eligibility");
-    assert!(eligible.target.shadowed.contains(&skill_id));
+    // The whole older prompt, call, result and loaded fact are eligible together.
+    assert_eq!(eligible.target.shadowed, before.surface_ids[1..]);
     let replayed = crate::Timeline::from_events(h.handle.timeline_events().await.unwrap()).unwrap();
     assert!(replayed.unconsumed_skill_load_ids().is_empty());
 }

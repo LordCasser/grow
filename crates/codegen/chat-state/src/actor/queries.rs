@@ -37,10 +37,7 @@ impl ChatStateActor {
         })
     }
 
-    /// Check if auto-compact is needed based on token utilization.
-    ///
-    /// Returns `Some(AutoCompactTrigger)` if `projected_tokens` exceeds
-    /// `context_window * threshold_percent / 100`, otherwise `None`.
+    /// Check both the current request and the history a cold lane would replay.
     pub(super) fn check_auto_compact_needed(
         &self,
         threshold_percent: u8,
@@ -48,11 +45,17 @@ impl ChatStateActor {
         let context_window = self.state.sampling_config.context_window;
         let cw = context_window.get();
 
-        if token_estimation::exceeds_threshold(self.state.projected_tokens, cw, threshold_percent) {
+        let portable_history_tokens = self.state.portable_history_tokens();
+        if token_estimation::exceeds_threshold(
+            self.state.projected_tokens.max(portable_history_tokens),
+            cw,
+            threshold_percent,
+        ) {
             let utilization_percent =
                 token_estimation::usage_percentage_truncated_u8(self.state.projected_tokens, cw);
             Some(AutoCompactTrigger {
                 projected_tokens: self.state.projected_tokens,
+                portable_history_tokens,
                 context_window,
                 utilization_percent,
             })

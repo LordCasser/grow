@@ -17,16 +17,61 @@ use crate::session::helpers::session_compact::{
     CompactionOutcome, build_compaction_request_surface, compaction_output_limit,
     is_context_length_error,
 };
+use crate::session::helpers::summary_compaction::SummaryFailureSource;
 use acp_transport::protocol as acp;
 use chat_state::compaction_utils::{
     fit_compaction_range_to_budget, is_degenerate_summary, plan_compaction_range,
     prepare_conversation_for_verbatim_summarization,
 };
 use sampling_types::{ApiBackend, ConversationItem};
-use std::sync::Arc;
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 const COMPACTION_RETAIN_PERCENT: u64 = 16;
 const MIN_COMPACTION_SOURCE_TOKENS: u64 = 5_000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompactionPurpose {
+    Manual,
+    Preventive,
+    RequiredRecovery,
+}
+
+impl CompactionPurpose {
+    fn trigger(self) -> ::diagnostics::events::CompactionTrigger {
+        match self {
+            Self::Manual => ::diagnostics::events::CompactionTrigger::Manual,
+            Self::Preventive | Self::RequiredRecovery => {
+                ::diagnostics::events::CompactionTrigger::Auto
+            }
+        }
+    }
+
+    fn provider_error(self, message: String) -> acp::Error {
+        if self == Self::Preventive {
+            acp::Error::internal_error().data(serde_json::json!({
+                "compact_error": COMPACT_SUMMARY_PROVIDER_FAILED,
+                "message": message,
+            }))
+        } else {
+            acp::Error::internal_error().data(message)
+        }
+    }
+
+    fn can_summarize(self, source: &[ConversationItem]) -> bool {
+        self != Self::Preventive
+            || source.iter().any(|item| match item {
+                ConversationItem::System(_) => false,
+                ConversationItem::User(user) => {
+                    user.synthetic_reason != Some(sampling_types::SyntheticReason::CompactionMeta)
+                }
+                // Model skill bodies travel in their paired tool result.
+                ConversationItem::SkillLoad(skill) => {
+                    skill.source != sampling_types::SkillLoadSource::Model
+                }
+                _ => true,
+            })
+    }
+}
 
 /// Assemble only the selected source. Budget reduction changes the range,
 /// never drops execution evidence while still replacing the original target.
@@ -95,6 +140,7 @@ pub(crate) struct BackgroundCompaction {
     started: std::time::Instant,
     cancel: tokio_util::sync::CancellationToken,
     background: Arc<std::sync::atomic::AtomicBool>,
+    purpose: Rc<Cell<CompactionPurpose>>,
     authority: Vec<chat_state::SurfaceId>,
     target: chat_state::SurfaceRange,
     model_key: (sampling_types::ModelImageInputKey, u64),
@@ -124,6 +170,7 @@ impl<'a> BackgroundCompactionOwner<'a> {
 
     fn restore(&mut self) {
         let pending = self.pending.take().expect("owned compaction job");
+        pending.purpose.set(CompactionPurpose::Preventive);
         pending
             .background
             .store(true, std::sync::atomic::Ordering::Release);
@@ -156,6 +203,7 @@ impl Drop for BackgroundCompactionOwner<'_> {
         if self.restore_on_drop
             && let Some(pending) = self.pending.take()
         {
+            pending.purpose.set(CompactionPurpose::Preventive);
             pending
                 .background
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -167,6 +215,19 @@ impl Drop for BackgroundCompactionOwner<'_> {
 
 type BackgroundCompactionJoin =
     Result<Result<GeneratedCompaction, acp::Error>, tokio::task::JoinError>;
+
+fn cancelled_background_failure(joined: BackgroundCompactionJoin) -> Option<acp::Error> {
+    match joined {
+        Ok(Err(error)) if crate::session::commands::is_fatal_turn_boundary_error(&error) => {
+            Some(error)
+        }
+        Err(error) => Some(crate::session::commands::fatal_turn_boundary_error(
+            "background compaction worker",
+            error.to_string(),
+        )),
+        _ => None,
+    }
+}
 
 async fn cancel_and_join_background_compaction<'a>(
     slot: &'a std::cell::RefCell<Option<BackgroundCompaction>>,
@@ -365,7 +426,7 @@ pub(crate) struct AutoCompactTriggerInfo {
     pub context_window: u64,
     pub percentage: u8,
     /// Invocation site, recorded verbatim in `AutoCompactPruned` diagnostics
-    /// (`pre_sampling` / `preflight_overflow` / `model_switch` /
+    /// (`pre_sampling` / `portable_replay` / `preflight_overflow` / `model_switch` /
     /// `context_window_exceeded` / `sampler_error_recovery`).
     pub source: &'static str,
     /// Explicit output reserve from the request that crossed the Step fence.
@@ -373,6 +434,74 @@ pub(crate) struct AutoCompactTriggerInfo {
 }
 
 impl AutoCompactTriggerInfo {
+    fn from_input_threshold(
+        pressure: &chat_state::AutoCompactTrigger,
+        threshold_percent: u8,
+        source: &'static str,
+        max_output_tokens: Option<u32>,
+    ) -> Self {
+        let context_window = pressure.context_window.get();
+        let source = if token_estimation::exceeds_threshold(
+            pressure.projected_tokens,
+            context_window,
+            threshold_percent,
+        ) {
+            source
+        } else {
+            tracing::debug!(
+                portable_history_tokens = pressure.portable_history_tokens,
+                projected_tokens = pressure.projected_tokens,
+                context_window,
+                "portable replay reached the automatic compaction threshold"
+            );
+            "portable_replay"
+        };
+        Self {
+            tokens_used: pressure.projected_tokens,
+            context_window,
+            percentage: token_estimation::usage_percentage_u8(
+                pressure.projected_tokens,
+                context_window,
+            ),
+            source,
+            max_output_tokens,
+        }
+    }
+
+    fn checks_portable_history(&self) -> bool {
+        matches!(
+            self.source,
+            "pre_sampling" | "async_pre_sampling" | "preflight_overflow" | "portable_replay"
+        )
+    }
+
+    pub(super) fn is_replay_maintenance(&self) -> bool {
+        self.source == "portable_replay"
+    }
+
+    pub(super) fn is_preventive(&self) -> bool {
+        matches!(
+            self.source,
+            "pre_sampling" | "async_pre_sampling" | "portable_replay"
+        ) && !self.recovering_overflow()
+    }
+
+    fn purpose(&self) -> CompactionPurpose {
+        if self.is_preventive() {
+            CompactionPurpose::Preventive
+        } else {
+            CompactionPurpose::RequiredRecovery
+        }
+    }
+
+    fn reason(&self, current_percentage: u8) -> String {
+        if self.is_replay_maintenance() {
+            "Preparing retained history for session resume".to_owned()
+        } else {
+            format!("Context window {current_percentage}% full")
+        }
+    }
+
     fn recovering_overflow(&self) -> bool {
         matches!(
             self.source,
@@ -454,7 +583,24 @@ fn model_switch_compaction_trigger(
 /// resampling in a loop (fail-safe).
 pub(crate) const COMPACT_CONVERGED_OVER_WINDOW: &str = "compact_converged_over_window";
 const COMPACT_NO_RANGE: &str = "no_eligible_range";
+const COMPACT_NO_NEW_SOURCE: &str = "only_previous_summaries";
+const COMPACT_SUMMARY_PROVIDER_FAILED: &str = "summary_provider_failed";
+const COMPACT_SOURCE_OVER_BUDGET: &str = "source_over_budget";
 const COMPACT_IMAGE_INPUT_UNSUPPORTED: &str = "compact_image_input_unsupported";
+
+fn compaction_error_kind(error: &acp::Error) -> Option<&str> {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data["compact_error"].as_str())
+}
+
+fn no_new_compaction_source() -> acp::Error {
+    acp::Error::internal_error().data(serde_json::json!({
+        "compact_error": COMPACT_NO_NEW_SOURCE,
+        "message": "Compaction skipped: the selected range contains only previous summaries",
+    }))
+}
 
 /// Whether `err` carries the [`COMPACT_CONVERGED_OVER_WINDOW`] marker.
 pub(crate) fn is_compact_converged_over_window(err: &acp::Error) -> bool {
@@ -697,11 +843,7 @@ impl SessionActor {
             .await;
         let mut committed = false;
         if let Err(e) = self
-            .run_compact_inner(
-                user_context,
-                ::diagnostics::events::CompactionTrigger::Manual,
-                &mut committed,
-            )
+            .run_compact_inner(user_context, CompactionPurpose::Manual, &mut committed)
             .await
         {
             let span = tracing::Span::current();
@@ -754,7 +896,11 @@ impl SessionActor {
                 elapsed_ms: Some(elapsed_ms),
                 summary_preview: None,
             }
-        } else if cancelled {
+        } else if cancelled
+            && !result
+                .as_ref()
+                .is_err_and(crate::session::commands::is_fatal_turn_boundary_error)
+        {
             SessionUpdate::AutoCompactCancelled {
                 reason: crate::extensions::notification::AutoCompactCancelReason::UserCancelled,
             }
@@ -788,6 +934,19 @@ impl SessionActor {
                 "message": format!("model request requires {tokens} tokens ({input_tokens} input + {output_tokens} output) but the context window is {window}; compact the history or select a larger model before retrying"),
                 "error_kind": ::hooks::event::StopFailureKind::ContextWindowExceeded.as_str(),
             })));
+        }
+        Ok(())
+    }
+
+    async fn admit_after_preventive_compaction(
+        &self,
+        output_limit: Option<u32>,
+    ) -> Result<(), acp::Error> {
+        self.ensure_model_context_fits(output_limit).await?;
+        if self.compaction.cancel.is_cancelled() {
+            return Err(
+                crate::session::helpers::session_compact::CompactFailure::cancelled_error(),
+            );
         }
         Ok(())
     }
@@ -961,14 +1120,14 @@ impl SessionActor {
     async fn run_compact_inner(
         self: &Arc<Self>,
         user_context: Option<String>,
-        trigger: ::diagnostics::events::CompactionTrigger,
+        purpose: CompactionPurpose,
         replacement_committed: &mut bool,
     ) -> Result<(), acp::Error> {
         let mut image_recovery_attempted = false;
         loop {
             let attempted_key = self.current_model_image_input_key().await;
             let result = self
-                .run_compact_transaction(user_context.clone(), trigger, replacement_committed)
+                .run_compact_transaction(user_context.clone(), purpose, replacement_committed)
                 .await;
             if !image_recovery_attempted
                 && let Some(attempted_key) = attempted_key
@@ -1026,7 +1185,7 @@ impl SessionActor {
     async fn run_compact_transaction(
         self: &Arc<Self>,
         user_context: Option<String>,
-        trigger: ::diagnostics::events::CompactionTrigger,
+        purpose: CompactionPurpose,
         replacement_committed: &mut bool,
     ) -> Result<(), acp::Error> {
         let id = uuid::Uuid::now_v7().to_string();
@@ -1050,13 +1209,13 @@ impl SessionActor {
         let started = std::time::Instant::now();
         *replacement_committed = false;
         let result = self
-            .run_compact_attempt(&id, user_context, trigger, replacement_committed)
+            .run_compact_attempt(&id, user_context, purpose, replacement_committed)
             .await;
         self.finish_compaction_transaction(
             &id,
             source_items,
             started,
-            trigger,
+            purpose.trigger(),
             result,
             *replacement_committed,
         )
@@ -1131,12 +1290,18 @@ impl SessionActor {
         self: &Arc<Self>,
         transaction_id: &str,
         user_context: Option<String>,
-        trigger: ::diagnostics::events::CompactionTrigger,
+        purpose: CompactionPurpose,
         replacement_committed: &mut bool,
     ) -> Result<(), acp::Error> {
         let (cancel, _cancel_scope) = self.compaction.cancel.enter();
         let prepared = self
-            .prepare_compaction(transaction_id, user_context, trigger, cancel, None)
+            .prepare_compaction(
+                transaction_id,
+                user_context,
+                Rc::new(Cell::new(purpose)),
+                cancel,
+                None,
+            )
             .await?;
         let generated = prepared.generation.await?;
         self.commit_generated_compaction(transaction_id, generated, replacement_committed)
@@ -1147,10 +1312,12 @@ impl SessionActor {
         self: &Arc<Self>,
         transaction_id: &str,
         user_context: Option<String>,
-        trigger: ::diagnostics::events::CompactionTrigger,
+        current_purpose: Rc<Cell<CompactionPurpose>>,
         cancel: tokio_util::sync::CancellationToken,
         background: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<PreparedCompaction, acp::Error> {
+        let purpose = current_purpose.get();
+        let trigger = purpose.trigger();
         let tokens_before = self.chat_state_handle.get_projected_tokens().await;
         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
         self.signals_handle().record_compaction(tokens_before);
@@ -1276,10 +1443,11 @@ impl SessionActor {
             acp::Error::internal_error()
                 .data("Compaction failed: no system message in conversation history")
         })?;
-        let overhead = chat_state::estimate_conversation_tokens(&build_compaction_request_surface(
-            vec![system_message.clone()],
-            user_context.as_deref(),
-        ));
+        let overhead =
+            chat_state::estimate_projected_message_tokens(&build_compaction_request_surface(
+                vec![system_message.clone()],
+                user_context.as_deref(),
+            ));
         let source_budget = input_budget.saturating_sub(overhead);
         if self.model_image_input_is_unsupported(&model_key.0).await {
             sampling_types::conversation::select_image_descriptions(&mut source_surface).map_err(
@@ -1292,17 +1460,18 @@ impl SessionActor {
         }
         let verbatim_input_enabled = self.compaction.verbatim_input;
         let system_tokens =
-            chat_state::estimate_conversation_tokens(std::slice::from_ref(&system_message));
+            chat_state::estimate_projected_message_tokens(std::slice::from_ref(&system_message));
         let mut range_plan = fit_compaction_range_to_budget(
             &source_surface, &materialized.surface_ids, &range_plan,
             source_budget, MIN_COMPACTION_SOURCE_TOKENS,
-            |source| chat_state::estimate_conversation_tokens(&compaction_summary_source(
+            |source| chat_state::estimate_projected_message_tokens(&compaction_summary_source(
                 source, &system_message, verbatim_input_enabled, summary_strips_reasoning,
                 context_recall_tool_name.as_deref(),
             )).saturating_sub(system_tokens),
-        ).ok_or_else(|| acp::Error::internal_error().data(
-            "compaction current message exceeds budget: no complete source range fits while preserving tool evidence",
-        ))?;
+        ).ok_or_else(|| acp::Error::internal_error().data(serde_json::json!({
+            "compact_error": COMPACT_SOURCE_OVER_BUDGET,
+            "message": "compaction current message exceeds budget: no complete source range fits while preserving tool evidence",
+        })))?;
         let simplified_messages = compaction_summary_source(
             &source_surface[range_plan.start_index..=range_plan.end_index],
             &system_message,
@@ -1310,6 +1479,9 @@ impl SessionActor {
             summary_strips_reasoning,
             context_recall_tool_name.as_deref(),
         );
+        if !purpose.can_summarize(&simplified_messages) {
+            return Err(no_new_compaction_source());
+        }
         let context_surface_ids = materialized
             .surface_ids
             .iter()
@@ -1374,7 +1546,7 @@ impl SessionActor {
                 let mut last_error: Option<acp::Error> = None;
                 let mut last_failure_outcome = CompactionOutcome::Failed;
                 let estimated_input_tokens =
-                    chat_state::estimate_conversation_tokens(&simplified_messages);
+                    chat_state::estimate_projected_message_tokens(&simplified_messages);
                 let auto_trigger =
                     matches!(trigger, ::diagnostics::events::CompactionTrigger::Auto);
                 let sampler =
@@ -1437,7 +1609,7 @@ impl SessionActor {
                             } else {
                                 CompactionOutcome::Transient
                             };
-                            last_error = Some(acp::Error::internal_error().data(
+                            last_error = Some(purpose.provider_error(
                                 observer.last_error_message().unwrap_or_else(|| {
                                     "compact failed: model returned empty response".to_string()
                                 }),
@@ -1449,7 +1621,10 @@ impl SessionActor {
                             deterministic,
                             context_overflow,
                         }) => {
-                            if let Some(error) = sampler.take_infrastructure_error() {
+                            let failure_source = sampler.take_failure_source();
+                            if let Some(SummaryFailureSource::Infrastructure(error)) =
+                                failure_source
+                            {
                                 last_error =
                                     Some(crate::session::commands::fatal_turn_boundary_error(
                                         "compaction sideband",
@@ -1479,7 +1654,10 @@ impl SessionActor {
                                     crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
                                 ));
                             }
-                            if sampler.take_image_input_unsupported() {
+                            if matches!(
+                                failure_source,
+                                Some(SummaryFailureSource::ImageInputUnsupported)
+                            ) {
                                 last_failure_outcome = CompactionOutcome::Deterministic;
                                 last_error = Some(compact_image_input_unsupported_error(message));
                                 break;
@@ -1494,7 +1672,7 @@ impl SessionActor {
                                             range_plan.source_tokens.saturating_mul(7) / 10,
                                             MIN_COMPACTION_SOURCE_TOKENS,
                                             |source| {
-                                                chat_state::estimate_conversation_tokens(
+                                                chat_state::estimate_projected_message_tokens(
                                                     &compaction_summary_source(
                                                         source,
                                                         &system_message,
@@ -1507,8 +1685,21 @@ impl SessionActor {
                                             },
                                         )
                                     })
-                                    .flatten();
-                                if let Some(next_plan) = next_plan {
+                                    .flatten()
+                                    .and_then(|plan| {
+                                        let source = compaction_summary_source(
+                                            &source_surface[plan.start_index..=plan.end_index],
+                                            &system_message,
+                                            verbatim_input_enabled,
+                                            summary_strips_reasoning,
+                                            context_recall_tool_name.as_deref(),
+                                        );
+                                        current_purpose
+                                            .get()
+                                            .can_summarize(&source)
+                                            .then_some((plan, source))
+                                    });
+                                if let Some((next_plan, source)) = next_plan {
                                     input_overflow_rejections += 1;
                                     ::diagnostics::session_ctx::log_event(
                                         ::diagnostics::events::CompactionRetryDegraded {
@@ -1523,14 +1714,7 @@ impl SessionActor {
                                         },
                                     );
                                     range_plan = next_plan;
-                                    request_turns = compaction_summary_source(
-                                        &source_surface
-                                            [range_plan.start_index..=range_plan.end_index],
-                                        &system_message,
-                                        verbatim_input_enabled,
-                                        summary_strips_reasoning,
-                                        context_recall_tool_name.as_deref(),
-                                    );
+                                    request_turns = source;
                                     continue;
                                 }
                                 last_failure_outcome = CompactionOutcome::Deterministic;
@@ -1543,10 +1727,7 @@ impl SessionActor {
                                         )
                                         .await;
                                 }
-                                last_error = Some(acp::Error::internal_error().data(message));
-                                break;
-                            }
-                            if deterministic {
+                            } else if deterministic {
                                 last_failure_outcome = CompactionOutcome::Deterministic;
                                 if auto_trigger && !background {
                                     let reason = Self::classify_suppress_reason(&message);
@@ -1558,11 +1739,16 @@ impl SessionActor {
                                         )
                                         .await;
                                 }
-                                last_error = Some(acp::Error::internal_error().data(message));
-                                break;
+                            } else {
+                                last_failure_outcome = CompactionOutcome::Transient;
                             }
-                            last_failure_outcome = CompactionOutcome::Transient;
-                            last_error = Some(acp::Error::internal_error().data(message));
+                            last_error = Some(
+                                if matches!(failure_source, Some(SummaryFailureSource::Provider)) {
+                                    purpose.provider_error(message)
+                                } else {
+                                    acp::Error::internal_error().data(message)
+                                },
+                            );
                             break;
                         }
                     }
@@ -2197,24 +2383,16 @@ impl SessionActor {
             pending.disarm_restore();
             // Discarding a ready result must not hide a durable-write failure
             // behind a subsequent manual compact/control operation.
-            let failure = match joined {
-                Ok(Err(error))
-                    if crate::session::commands::is_fatal_turn_boundary_error(&error) =>
-                {
-                    Some(error)
-                }
-                Err(error) => Some(crate::session::commands::fatal_turn_boundary_error(
-                    "background compaction worker",
-                    error.to_string(),
-                )),
-                _ => None,
-            };
+            let failure = cancelled_background_failure(joined);
             self.chat_state_handle
                 .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
                     chat_state::CompactionEvent::Failed {
                         id: pending.id.clone(),
                         duration_ms: pending.started.elapsed().as_millis() as u64,
-                        error: reason.to_owned(),
+                        error: failure
+                            .as_ref()
+                            .map(Self::acp_error_message)
+                            .unwrap_or_else(|| reason.to_owned()),
                     },
                 ))
                 .await
@@ -2272,27 +2450,29 @@ impl SessionActor {
         let Some(threshold) = pre_compact_threshold(self.compaction.threshold_percent.get()) else {
             return Ok(committed);
         };
-        let Some(config) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(pressure) = self
+            .chat_state_handle
+            .check_auto_compact_needed(threshold)
+            .await
+        else {
             return Ok(committed);
         };
-        let tokens = self.chat_state_handle.get_projected_tokens().await;
         // A direct jump to the hard threshold belongs to the existing sync path.
         if token_estimation::exceeds_threshold(
-            tokens,
-            config.context_window.get(),
+            pressure
+                .projected_tokens
+                .max(pressure.portable_history_tokens),
+            pressure.context_window.get(),
             self.compaction.threshold_percent.get(),
         ) {
             return Ok(committed);
         }
-        let Some(trigger) = auto_compact_trigger(
-            tokens,
-            config.context_window,
+        let trigger = AutoCompactTriggerInfo::from_input_threshold(
+            &pressure,
             threshold,
             "async_pre_sampling",
             None,
-        ) else {
-            return Ok(committed);
-        };
+        );
         if self.maybe_pre_prune_at(&trigger, threshold, false).await? {
             return Ok(committed);
         }
@@ -2310,15 +2490,18 @@ impl SessionActor {
             &materialized.surface,
             &materialized.surface_ids,
             &materialized.unconsumed_skill_load_ids,
-            config
+            pressure
                 .context_window
                 .get()
                 .saturating_mul(COMPACTION_RETAIN_PERCENT)
                 / 100,
             MIN_COMPACTION_SOURCE_TOKENS,
         )
-        .is_none()
-        {
+        .is_none_or(|range| {
+            !trigger
+                .purpose()
+                .can_summarize(&materialized.surface[range.start_index..=range.end_index])
+        }) {
             return Ok(committed);
         }
         let id = uuid::Uuid::now_v7().to_string();
@@ -2343,16 +2526,17 @@ impl SessionActor {
                 )
             })?;
         self.maybe_pre_compaction_flush(
-            tokens,
-            config.context_window.get(),
+            pressure.projected_tokens,
+            pressure.context_window.get(),
             "async_pre_compaction",
         )
         .await;
+        let purpose = Rc::new(Cell::new(trigger.purpose()));
         match self
             .prepare_compaction(
                 &id,
                 None,
-                ::diagnostics::events::CompactionTrigger::Auto,
+                purpose.clone(),
                 cancel.clone(),
                 Some(background.clone()),
             )
@@ -2366,6 +2550,7 @@ impl SessionActor {
                     started,
                     cancel,
                     background,
+                    purpose,
                     authority: prepared.authority,
                     target: prepared.target,
                     model_key: prepared.model_key,
@@ -2373,7 +2558,9 @@ impl SessionActor {
                 });
             }
             Err(error) => {
-                self.compaction.background_failed.set(true);
+                if compaction_error_kind(&error) != Some(COMPACT_NO_NEW_SOURCE) {
+                    self.compaction.background_failed.set(true);
+                }
                 if let Err(error) = self
                     .finish_compaction_transaction(
                         &id,
@@ -2385,12 +2572,13 @@ impl SessionActor {
                     )
                     .await
                 {
-                    if crate::session::commands::is_fatal_turn_boundary_error(&error)
-                        || Self::is_auth_compact_error(&error)
-                    {
+                    if !matches!(
+                        compaction_error_kind(&error),
+                        Some(COMPACT_NO_RANGE | COMPACT_NO_NEW_SOURCE | COMPACT_SOURCE_OVER_BUDGET)
+                    ) {
                         return Err(error);
                     }
-                    tracing::warn!(%error, "background compaction preparation failed; synchronous recovery remains available");
+                    tracing::debug!(%error, "background compaction found no fitting range");
                 }
             }
         }
@@ -2485,7 +2673,8 @@ impl SessionActor {
         }
         let foreground_started = std::time::Instant::now();
         let tokens_before = self.chat_state_handle.get_projected_tokens().await;
-        if wait {
+        if let Some(trigger) = foreground {
+            pending.purpose.set(trigger.purpose());
             pending
                 .background
                 .store(false, std::sync::atomic::Ordering::Release);
@@ -2514,7 +2703,7 @@ impl SessionActor {
                     tokens_used: tokens_before,
                     context_window,
                     percentage,
-                    reason: format!("Context window {percentage}% full"),
+                    reason: trigger.reason(percentage),
                 },
             )
             .await;
@@ -2523,10 +2712,8 @@ impl SessionActor {
             biased;
             _ = cancel.cancelled() => {
                 pending.cancel.cancel();
-                match (&mut pending.worker).await {
-                    Ok(_) => Err(acp::Error::internal_error().data(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)),
-                    Err(error) => Err(crate::session::commands::fatal_turn_boundary_error("background compaction worker", error.to_string())),
-                }
+                Err(cancelled_background_failure((&mut pending.worker).await)
+                    .unwrap_or_else(crate::session::helpers::session_compact::CompactFailure::cancelled_error))
             }
             result = &mut pending.worker => result.unwrap_or_else(|error| Err(crate::session::commands::fatal_turn_boundary_error("background compaction worker", error.to_string()))),
         };
@@ -2534,7 +2721,6 @@ impl SessionActor {
         // A later publication cancellation cannot detach that worker.
         pending.disarm_restore();
         let mut committed = false;
-        let generation_failed = generated.is_err();
         let result = match generated {
             Ok(generated) => {
                 // The provider wait is not a control lock. Revalidate the frozen
@@ -2563,7 +2749,7 @@ impl SessionActor {
                 committed,
             )
             .await;
-        if wait
+        if let Some(trigger) = foreground
             && result
                 .as_ref()
                 .is_err_and(is_compact_image_input_unsupported)
@@ -2576,12 +2762,8 @@ impl SessionActor {
                         .recover_compaction_image_input(&pending.model_key.0)
                         .await?
                 {
-                    self.run_compact_inner(
-                        None,
-                        ::diagnostics::events::CompactionTrigger::Auto,
-                        &mut committed,
-                    )
-                    .await
+                    self.run_compact_inner(None, trigger.purpose(), &mut committed)
+                        .await
                 } else {
                     result
                 }
@@ -2625,13 +2807,32 @@ impl SessionActor {
                 Ok(true)
             }
             Err(error) => {
-                self.compaction.background_failed.set(true);
+                let compact_error = compaction_error_kind(&error);
+                if compact_error != Some(COMPACT_NO_NEW_SOURCE) {
+                    self.compaction.background_failed.set(true);
+                }
+                if !wait
+                    && !committed
+                    && !cancel.is_cancelled()
+                    && compact_error == Some(COMPACT_SUMMARY_PROVIDER_FAILED)
+                {
+                    let reason = Self::classify_suppress_reason(&Self::acp_error_message(&error));
+                    self.suppress_auto_compaction(reason, tokens_before, pending.model_key.1)
+                        .await;
+                    if matches!(reason, SuppressReason::Auth | SuppressReason::ProviderLimit) {
+                        return Err(error);
+                    }
+                    return Ok(false);
+                }
                 if !wait
                     && !committed
                     && !crate::session::commands::is_fatal_turn_boundary_error(&error)
-                    && !Self::is_auth_compact_error(&error)
+                    && (cancel.is_cancelled()
+                        || is_compact_image_input_unsupported(&error)
+                        || error.data.as_ref().and_then(|data| data.as_str())
+                            == Some("compaction_source_invalidated"))
                 {
-                    tracing::warn!(%error, generation_failed, "background compaction discarded; synchronous recovery remains available");
+                    tracing::debug!(%error, "background compaction invalidated before publication");
                     return Ok(false);
                 }
                 if let Some(trigger) = foreground {
@@ -2705,8 +2906,7 @@ impl SessionActor {
             .unwrap_or(0);
         sampling_error_compaction_window(err, projected_tokens, configured_context_window)
     }
-    /// Pre-sampling compaction check against the canonical projected context
-    /// pressure. Returns `None` when `is_flushing`.
+    /// Ordinary pre-sampling maintenance checks both the current request and cold replay.
     pub(crate) async fn check_auto_compact_needed(
         &self,
         max_output_tokens: Option<u32>,
@@ -2756,7 +2956,7 @@ impl SessionActor {
                 tokens_used: projected_tokens,
                 context_window: cw,
                 percentage,
-                source: "pre_sampling",
+                source: "forced",
                 max_output_tokens,
             });
         }
@@ -2776,7 +2976,26 @@ impl SessionActor {
             );
             return Some(trigger_info);
         }
-        None
+        self.input_threshold_trigger("pre_sampling", max_output_tokens)
+            .await
+    }
+
+    async fn input_threshold_trigger(
+        &self,
+        source: &'static str,
+        max_output_tokens: Option<u32>,
+    ) -> Option<AutoCompactTriggerInfo> {
+        let threshold = self.compaction.threshold_percent.get();
+        let pressure = self
+            .chat_state_handle
+            .check_auto_compact_needed(threshold)
+            .await?;
+        Some(AutoCompactTriggerInfo::from_input_threshold(
+            &pressure,
+            threshold,
+            source,
+            max_output_tokens,
+        ))
     }
     /// Returns `Some` when tool call outputs have pushed projected context
     /// count past the context window, indicating pre-emptive compaction is needed.
@@ -2850,7 +3069,7 @@ impl SessionActor {
             cfg.context_window.get(),
             trigger_info.percentage,
         );
-        if let Err(e) = self.run_compact_only(trigger_info).await {
+        if let Err(e) = Box::pin(self.run_compact_only(trigger_info)).await {
             tracing::error!(error = %e, "Model-switch compaction failed");
             if Self::is_auth_compact_error(&e) {
                 return Err(self.surface_compact_auth_failure(e).await);
@@ -2985,6 +3204,12 @@ impl SessionActor {
         if token_estimation::exceeds_threshold(tokens_after, context_window, threshold_percent)
             || tokens_after.saturating_add(u64::from(trigger_info.max_output_tokens.unwrap_or(0)))
                 > context_window
+            || (trigger_info.checks_portable_history()
+                && self
+                    .chat_state_handle
+                    .check_auto_compact_needed(threshold_percent)
+                    .await
+                    .is_some())
         {
             // Still at/over the trigger threshold: continue with the summary
             // path. Its input is smaller now (the pruned content is persisted),
@@ -3114,13 +3339,19 @@ impl SessionActor {
                 return Err(acp::Error::internal_error()
                     .data("compaction sampling configuration is unavailable"));
             };
-            let Some(updated) = auto_compact_trigger(
+            let mut updated = auto_compact_trigger(
                 projected_tokens,
                 config.context_window,
                 self.compaction.threshold_percent.get(),
                 trigger_info.source,
                 trigger_info.max_output_tokens,
-            ) else {
+            );
+            if updated.is_none() && trigger_info.checks_portable_history() {
+                updated = self
+                    .input_threshold_trigger("pre_sampling", trigger_info.max_output_tokens)
+                    .await;
+            }
+            let Some(updated) = updated else {
                 tracing::info!(
                     projected_tokens,
                     context_window = config.context_window.get(),
@@ -3144,7 +3375,7 @@ impl SessionActor {
             tokens_used: trigger_info.tokens_used,
             context_window: trigger_info.context_window,
             percentage: trigger_info.percentage,
-            reason: format!("Context window {}% full", trigger_info.percentage),
+            reason: trigger_info.reason(trigger_info.percentage),
         })
         .await;
         self.maybe_pre_compaction_flush(
@@ -3182,11 +3413,7 @@ impl SessionActor {
         let compact_start = std::time::Instant::now();
         let mut committed = false;
         let result = self
-            .run_compact_inner(
-                None,
-                ::diagnostics::events::CompactionTrigger::Auto,
-                &mut committed,
-            )
+            .run_compact_inner(None, trigger_info.purpose(), &mut committed)
             .await;
         let elapsed_ms = compact_start.elapsed().as_millis() as i64;
         match result {
@@ -3237,7 +3464,10 @@ impl SessionActor {
         let cancelled = cancelled
             || error.data.as_ref().and_then(|data| data.as_str())
                 == Some(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG);
-        if !cancelled {
+        let compact_error = compaction_error_kind(&error);
+        let no_new_source = compact_error == Some(COMPACT_NO_NEW_SOURCE) && trigger.is_preventive();
+        let provider_failure = compact_error == Some(COMPACT_SUMMARY_PROVIDER_FAILED);
+        if !cancelled && !no_new_source {
             self.suppress_auto_compaction(
                 Self::classify_suppress_reason(&Self::acp_error_message(&error)),
                 tokens_before,
@@ -3245,16 +3475,15 @@ impl SessionActor {
             )
             .await;
         }
-        let no_range = error
-            .data
-            .as_ref()
-            .and_then(|data| data["compact_error"].as_str())
-            == Some(COMPACT_NO_RANGE);
+        let no_range = no_new_source
+            || compact_error == Some(COMPACT_NO_RANGE)
+            || (trigger.is_replay_maintenance()
+                && compact_error == Some(COMPACT_SOURCE_OVER_BUDGET));
         if no_range && !committed && !cancelled && !trigger.recovering_overflow() {
             // The planner did no work. The next Step still rebuilds the
             // request and checks its hard window before provider dispatch.
             match self
-                .ensure_model_context_fits(trigger.max_output_tokens)
+                .admit_after_preventive_compaction(trigger.max_output_tokens)
                 .await
             {
                 Ok(()) => {
@@ -3276,6 +3505,19 @@ impl SessionActor {
             cancelled,
         )
         .await;
+        if provider_failure
+            && trigger.is_preventive()
+            && !committed
+            && !cancelled
+            && !matches!(
+                Self::classify_suppress_reason(&Self::acp_error_message(&error)),
+                SuppressReason::Auth | SuppressReason::ProviderLimit
+            )
+        {
+            return self
+                .admit_after_preventive_compaction(trigger.max_output_tokens)
+                .await;
+        }
         if !cancelled
             && trigger.recovering_overflow()
             && !crate::session::commands::is_fatal_turn_boundary_error(&error)
@@ -3318,6 +3560,7 @@ mod cancelled_compaction_owner_tests {
             };
             let background = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
             let slot = std::cell::RefCell::new(Some(BackgroundCompaction {
+                purpose: Rc::new(Cell::new(CompactionPurpose::Preventive)),
                 id,
                 source_items: 0,
                 started: std::time::Instant::now(),
@@ -3380,6 +3623,7 @@ mod cancelled_compaction_owner_tests {
             };
             let background = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
             let slot = std::cell::RefCell::new(Some(BackgroundCompaction {
+                purpose: Rc::new(Cell::new(CompactionPurpose::Preventive)),
                 id: uuid::Uuid::now_v7().to_string(),
                 source_items: 0,
                 started: std::time::Instant::now(),
@@ -3529,6 +3773,7 @@ mod context_recall_tests {
                     .unwrap();
                 let original = actor.chat_state_handle.get_sampling_config().await.unwrap();
                 let pending = BackgroundCompaction {
+                    purpose: Rc::new(Cell::new(CompactionPurpose::Preventive)),
                     id: "frozen-image-compaction".into(),
                     source_items: materialized.surface_ids.len(),
                     started: std::time::Instant::now(),
@@ -3650,6 +3895,7 @@ mod context_recall_tests {
                     item: 0,
                 };
                 *actor.compaction.background.borrow_mut() = Some(BackgroundCompaction {
+                    purpose: Rc::new(Cell::new(CompactionPurpose::Preventive)),
                     id: "failed-background".into(),
                     source_items: 0,
                     started: std::time::Instant::now(),
@@ -4038,6 +4284,81 @@ mod compaction_boundary_regressions {
         }
     }
 
+    #[test]
+    fn preventive_progress_uses_the_fitted_provider_source() {
+        let system = ConversationItem::system("system");
+        let mut prompt = ConversationItem::user("task");
+        prompt.set_prompt_index(0);
+        let summary = ConversationItem::user_meta("s".repeat(24_000));
+        let tool_group = |id: &str, name: &str, bytes: usize| {
+            [
+                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    arguments: "{}".into(),
+                }]),
+                ConversationItem::tool_result(id, "r".repeat(bytes)),
+            ]
+        };
+        let mut surface = vec![system.clone(), prompt, summary.clone()];
+        surface.extend(tool_group("old", "grep", 48_000));
+        surface.extend(tool_group("tail", "grep", 80_000));
+        let ids: Vec<_> = (0..surface.len())
+            .map(|item| chat_state::SurfaceId {
+                event: chat_state::EventSeq::new(1),
+                item: item as u32,
+            })
+            .collect();
+        let plan = plan_compaction_range(&surface, &ids, &[], 16_000, 5_000).unwrap();
+        let source = |range: &chat_state::compaction_utils::CompactionRangePlan| {
+            compaction_summary_source(
+                &surface[range.start_index..=range.end_index],
+                &system,
+                true,
+                false,
+                None,
+            )
+        };
+        assert!(CompactionPurpose::Preventive.can_summarize(&source(&plan)));
+        let fitted = fit_compaction_range_to_budget(
+            &surface,
+            &ids,
+            &plan,
+            8_000,
+            5_000,
+            chat_state::estimate_projected_message_tokens,
+        )
+        .unwrap();
+        let fitted_source = source(&fitted);
+        assert_eq!(fitted.start_index, fitted.end_index);
+        assert!(!CompactionPurpose::Preventive.can_summarize(&fitted_source));
+        assert!(CompactionPurpose::RequiredRecovery.can_summarize(&fitted_source));
+        assert!(CompactionPurpose::Manual.can_summarize(&fitted_source));
+
+        let mut derived = vec![
+            summary,
+            ConversationItem::SkillLoad(sampling_types::SkillLoadItem {
+                input_id: "input".into(),
+                reference_index: 0,
+                call_id: "skill".into(),
+                skill_name: "review".into(),
+                args: "{}".into(),
+                prepared_body: "metadata".into(),
+                source: sampling_types::SkillLoadSource::Model,
+                prompt_index: None,
+            }),
+        ];
+        derived.extend(tool_group("recall", "renamed_context_recall", 48_000));
+        let stripped = compaction_summary_source(
+            &derived,
+            &system,
+            true,
+            false,
+            Some("renamed_context_recall"),
+        );
+        assert!(!CompactionPurpose::Preventive.can_summarize(&stripped));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn ordinary_cancel_signals_unpromoted_generation() {
         tokio::task::LocalSet::new()
@@ -4055,6 +4376,7 @@ mod compaction_boundary_regressions {
                     item: 0,
                 };
                 *actor.compaction.background.borrow_mut() = Some(BackgroundCompaction {
+                    purpose: Rc::new(Cell::new(CompactionPurpose::Preventive)),
                     id: "audit-unpromoted".into(),
                     source_items: 1,
                     started: std::time::Instant::now(),

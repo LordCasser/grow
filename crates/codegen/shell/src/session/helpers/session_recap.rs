@@ -12,7 +12,7 @@
 
 use crate::sampling::ConversationItem;
 use crate::session::helpers::text::floor_char_boundary;
-use chat_state::{compaction_utils, estimate_conversation_tokens, estimate_item_tokens};
+use chat_state::{compaction_utils, estimate_item_tokens, estimate_projected_message_tokens};
 
 /// Hard cap on the recap text length (characters). Generous headroom: the recap
 /// instruction targets ~25–40 words (≈240 chars at the top end), so this only
@@ -139,7 +139,7 @@ pub(crate) fn budget_recap_items(
     // Use the original snapshot for the fast/trimmed branch decision. Portable
     // projection can normalize an item into different text, so this estimate
     // is not treated as a strict post-projection bound.
-    let pre_tokens = estimate_conversation_tokens(&conversation);
+    let pre_tokens = estimate_projected_message_tokens(&conversation);
     if pre_tokens <= snapshot_budget {
         return build_recap_items(conversation, tag, strip_reasoning);
     }
@@ -153,7 +153,7 @@ pub(crate) fn budget_recap_items(
     let snapshot = sampling_types::project_portable_history(&conversation);
     let trimmed = compaction_utils::fit_conversation_to_budget(snapshot, snapshot_budget);
     let mut items = sampling_types::project_portable_history(&trimmed);
-    let post_tokens = estimate_conversation_tokens(&items);
+    let post_tokens = estimate_projected_message_tokens(&items);
     tracing::debug!(
         context_window,
         effective_window,
@@ -647,7 +647,7 @@ mod tests {
         let snapshot_plus_instruction = conv.len() + 1;
         let out = budget_recap_items(conv, "system-reminder", false, 8_000);
         assert!(
-            estimate_conversation_tokens(&out) <= recap_prompt_budget(8_000),
+            estimate_projected_message_tokens(&out) <= recap_prompt_budget(8_000),
             "trimmed recap must fit the prompt budget"
         );
         assert!(
@@ -729,7 +729,7 @@ mod tests {
             "giant turn must be truncated in place, not dropped"
         );
         assert!(matches!(out.last(), Some(ConversationItem::User(_))));
-        assert!(estimate_conversation_tokens(&out) <= recap_prompt_budget(8_000));
+        assert!(estimate_projected_message_tokens(&out) <= recap_prompt_budget(8_000));
         let serialized = serde_json::to_string(&out).unwrap();
         assert!(
             serialized.contains("truncated"),
@@ -791,17 +791,18 @@ mod tests {
 
         // 1M advertises a larger window but clamps to the 500k floor => identical.
         assert_eq!(
-            estimate_conversation_tokens(&out_1m),
-            estimate_conversation_tokens(&out_500),
+            estimate_projected_message_tokens(&out_1m),
+            estimate_projected_message_tokens(&out_500),
             "1M must clamp to the 500k floor (identical budget)"
         );
-        assert!(estimate_conversation_tokens(&out_500) <= recap_prompt_budget(500_000));
+        assert!(estimate_projected_message_tokens(&out_500) <= recap_prompt_budget(500_000));
         // 256k is below the floor => strictly smaller budget and output.
         assert!(
-            estimate_conversation_tokens(&out_256) < estimate_conversation_tokens(&out_500),
+            estimate_projected_message_tokens(&out_256)
+                < estimate_projected_message_tokens(&out_500),
             "256k must produce a smaller budget than the 500k floor"
         );
-        assert!(estimate_conversation_tokens(&out_256) <= recap_prompt_budget(256_000));
+        assert!(estimate_projected_message_tokens(&out_256) <= recap_prompt_budget(256_000));
     }
 
     #[test]
@@ -838,7 +839,7 @@ mod tests {
             call.clone(),
             result.clone(),
         ];
-        assert_eq!(estimate_conversation_tokens(&at), snapshot_budget);
+        assert_eq!(estimate_projected_message_tokens(&at), snapshot_budget);
         let out_at = budget_recap_items(at, tag, false, 8_000);
         assert!(
             out_at
@@ -854,7 +855,7 @@ mod tests {
             call,
             result,
         ];
-        assert!(estimate_conversation_tokens(&over) > snapshot_budget);
+        assert!(estimate_projected_message_tokens(&over) > snapshot_budget);
         let out_over = budget_recap_items(over, tag, false, 8_000);
         assert!(
             !out_over

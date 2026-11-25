@@ -3,6 +3,7 @@
 //! These are stateless functions that operate on conversation data only —
 //! no I/O, no actor state. They live in `chat-state` so that both
 //! this crate and `shell` can share them without duplication.
+use crate::estimate_projected_item_tokens;
 use sampling_types::{ContentPart, ConversationItem};
 use std::collections::BTreeSet;
 
@@ -223,29 +224,32 @@ pub fn prepare_conversation_for_verbatim_summarization(
     };
     truncate_trailing_incomplete_tool_call(conversation)
 }
-/// Per-item token estimate via the trigger-side estimator, so `fit`'s budget matches what fired the compaction (counts images + encrypted reasoning).
-fn estimate_item_tokens(item: &ConversationItem) -> u64 {
-    crate::actor::state::estimate_item_tokens(item)
-}
 /// Shrink a verbatim conversation to `max_tokens`: drop oldest whole turns (System kept, tool runs unsplit; the last turn is truncated in place rather than dropped).
 pub fn fit_conversation_to_budget(
     conversation: Vec<ConversationItem>,
     max_tokens: u64,
 ) -> Vec<ConversationItem> {
-    let total: u64 = conversation.iter().map(estimate_item_tokens).sum();
+    let total: u64 = conversation
+        .iter()
+        .map(estimate_projected_item_tokens)
+        .sum();
     if total <= max_tokens {
         return conversation;
     }
     let mut head: Vec<ConversationItem> = Vec::new();
     let mut body: Vec<ConversationItem> = conversation;
+    // Trim the actual provider suffix. A trailing metadata fact must not hide
+    // the tool result that recover_truncated_tail_unit needs to retain.
+    body.retain(|item| !matches!(item, ConversationItem::SkillLoad(skill) if skill.source == sampling_types::SkillLoadSource::Model));
     if matches!(body.first(), Some(ConversationItem::System(_))) {
         head.push(body.remove(0));
     }
-    let budget = max_tokens.saturating_sub(head.iter().map(estimate_item_tokens).sum::<u64>());
+    let budget =
+        max_tokens.saturating_sub(head.iter().map(estimate_projected_item_tokens).sum::<u64>());
     let mut remaining = budget;
     let mut start = body.len();
     for i in (0..body.len()).rev() {
-        let cost = estimate_item_tokens(&body[i]);
+        let cost = estimate_projected_item_tokens(&body[i]);
         if cost > remaining {
             break;
         }
@@ -286,7 +290,10 @@ fn recover_truncated_tail_unit(
     } else {
         None
     };
-    let owner_cost = owner.as_ref().map(estimate_item_tokens).unwrap_or(0);
+    let owner_cost = owner
+        .as_ref()
+        .map(estimate_projected_item_tokens)
+        .unwrap_or(0);
     let result_budget = budget.saturating_sub(owner_cost);
     let per = (result_budget / results.len() as u64).max(1);
     let mut unit: Vec<ConversationItem> = Vec::new();
@@ -584,8 +591,8 @@ pub fn plan_compaction_range(
 
     let mut suffix_tokens = vec![0u64; surface.len() + 1];
     for index in (0..surface.len()).rev() {
-        suffix_tokens[index] =
-            suffix_tokens[index + 1].saturating_add(estimate_item_tokens(&surface[index]));
+        suffix_tokens[index] = suffix_tokens[index + 1]
+            .saturating_add(estimate_projected_item_tokens(&surface[index]));
     }
     let range_tokens = |start: usize, end: usize| {
         suffix_tokens[start].saturating_sub(suffix_tokens[end.saturating_add(1)])
@@ -3725,20 +3732,34 @@ actual user question";
     /// An oversized most-recent tool result is kept but truncated in place (with its `tool_use`), not dropped.
     #[test]
     fn fit_truncates_oversized_tail_result_in_place() {
-        use sampling_types::ToolCall;
+        use sampling_types::{SkillLoadItem, SkillLoadSource, ToolCall};
         let huge = "z".repeat(40_000);
-        let conv = vec![
+        let mut conv = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("old"),
             ConversationItem::assistant("old answer"),
             ConversationItem::assistant_tool_calls(vec![ToolCall {
                 id: "c1".into(),
-                name: "read_file".to_string(),
+                name: "load_skill".to_string(),
                 arguments: "{}".into(),
             }]),
             ConversationItem::tool_result("c1", huge.as_str()), // triggering result
         ];
-        let out = fit_conversation_to_budget(conv, 100);
+        let out = fit_conversation_to_budget(conv.clone(), 100);
+        conv.push(ConversationItem::SkillLoad(SkillLoadItem {
+            input_id: "model:c1".into(),
+            reference_index: 0,
+            call_id: "c1".into(),
+            skill_name: "guide".into(),
+            source: SkillLoadSource::Model,
+            args: String::new(),
+            prepared_body: huge.as_str().into(),
+            prompt_index: None,
+        }));
+        assert_eq!(
+            serde_json::to_value(fit_conversation_to_budget(conv, 100)).unwrap(),
+            serde_json::to_value(&out).unwrap()
+        );
         let tr = out
             .iter()
             .find_map(|i| match i {
@@ -3759,7 +3780,7 @@ actual user question";
                 .any(|i| matches!(i, ConversationItem::Assistant(a) if !a.tool_calls.is_empty())),
             "owning assistant tool_use must be kept so the result is not orphaned"
         );
-        let est: u64 = out.iter().map(estimate_item_tokens).sum();
+        let est: u64 = out.iter().map(estimate_projected_item_tokens).sum();
         assert!(
             est <= 100 + 64,
             "truncated unit should fit budget (+ marker slack)"

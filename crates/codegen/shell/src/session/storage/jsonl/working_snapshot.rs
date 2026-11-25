@@ -70,7 +70,7 @@ impl IndexedUserEchoRow {
     }
 }
 
-const VERSION: u8 = 53;
+const VERSION: u8 = 54;
 const MANIFEST: &str = "working-history.json";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 #[cfg(unix)]
