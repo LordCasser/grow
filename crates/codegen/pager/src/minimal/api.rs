@@ -266,6 +266,11 @@ pub fn agent_session_reload_active(agent: &AgentView) -> bool {
     agent.session_reload.is_some()
 }
 
+/// Retain reversible live rendering until an inherited prefix can print first.
+pub fn agent_native_history_pending(agent: &AgentView) -> bool {
+    agent.session_reload.is_some() || agent.child_seed_history.is_some()
+}
+
 pub fn agent_prompt(agent: &AgentView) -> &PromptWidget {
     &agent.prompt
 }

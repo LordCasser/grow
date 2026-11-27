@@ -1855,7 +1855,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let handle = self
             .session_handle_waiting_for_load(&arguments.session_id)
             .await
-            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+            .ok_or_else(crate::session::session_not_resident_error)?;
         let prompt_id = arguments
             .meta
             .as_ref()
@@ -2326,7 +2326,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let handle = self
             .control_session_handle_waiting_for_load(&args.session_id)
             .await
-            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+            .ok_or_else(crate::session::session_not_resident_error)?;
         let (tx, rx) = oneshot::channel();
         handle
             .cmd_tx
@@ -2353,7 +2353,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let handle = self
             .control_session_handle_waiting_for_load(&args.session_id)
             .await
-            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+            .ok_or_else(crate::session::session_not_resident_error)?;
         let value = args
             .value
             .as_value_id()

@@ -407,7 +407,7 @@ fn visible(
 }
 
 pub(super) fn read_page(
-    db: &redb::Database,
+    db: &dyn ReadableDatabase,
     bytes: u64,
     query: TimelineQuery,
     limit: usize,
@@ -453,7 +453,7 @@ pub(super) fn read_page(
 }
 
 #[cfg(test)]
-pub(super) fn read_generation(db: &redb::Database, bytes: u64) -> io::Result<u64> {
+pub(super) fn read_generation(db: &dyn ReadableDatabase, bytes: u64) -> io::Result<u64> {
     let tx = db.begin_read().map_err(io::Error::other)?;
     let spans = tx.open_table(SPANS).map_err(io::Error::other)?;
     let span: Span = spans
@@ -521,7 +521,7 @@ fn read_rank_row(
 
 /// `None` means this cut has no published catalog. A present count can be zero
 /// when every stored prompt is still provisional.
-pub(super) fn read_count(db: &redb::Database, bytes: u64) -> io::Result<Option<u64>> {
+pub(super) fn read_count(db: &dyn ReadableDatabase, bytes: u64) -> io::Result<Option<u64>> {
     let tx = db.begin_read().map_err(io::Error::other)?;
     match published_span(&tx, bytes) {
         Ok(span) => Ok(Some(span.count)),
@@ -539,7 +539,7 @@ pub(super) fn read_count(db: &redb::Database, bytes: u64) -> io::Result<Option<u
 /// probe. `exact` is source identity, not preview text. Each step reads one
 /// rank row, so a capture probes O(log count) metadata.
 pub(super) fn rank_lower_bound(
-    db: &redb::Database,
+    db: &dyn ReadableDatabase,
     bytes: u64,
     source: HistorySourceKey,
     display_segment: Option<u32>,
@@ -570,7 +570,11 @@ pub(super) fn rank_lower_bound(
     Ok(RankBound { ordinal: lo, exact })
 }
 
-pub(super) fn message_seen(db: &redb::Database, bytes: u64, message_id: &str) -> io::Result<bool> {
+pub(super) fn message_seen(
+    db: &dyn ReadableDatabase,
+    bytes: u64,
+    message_id: &str,
+) -> io::Result<bool> {
     let tx = db.begin_read().map_err(io::Error::other)?;
     let span = published_span(&tx, bytes)?;
     let seen = tx.open_table(SEEN).map_err(io::Error::other)?;
@@ -586,7 +590,7 @@ pub(super) fn message_seen(db: &redb::Database, bytes: u64, message_id: &str) ->
 /// Rank rows in `[start, end)`. Callers pass a page-sized window; this does
 /// not walk the rest of the generation.
 pub(super) fn read_rank_window(
-    db: &redb::Database,
+    db: &dyn ReadableDatabase,
     bytes: u64,
     start: u64,
     end: u64,

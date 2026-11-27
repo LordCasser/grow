@@ -2699,3 +2699,73 @@ fn mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent() {
 
     reset_mouse_capture_enabled(true);
 }
+
+#[test]
+fn missing_session_reloads_the_current_root_once_and_preserves_its_draft() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let prompt_id = "rejected-before-admission";
+    let root = app.agents.get_mut(&id).unwrap();
+    let sid = root.session.session_id.clone().unwrap();
+    let cwd = root.session.cwd.clone();
+    root.session.state = AgentState::TurnSubmitting;
+    root.session.current_prompt_id = Some(prompt_id.into());
+    root.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+        prompt_id: Some(prompt_id.into()),
+        text: "continue here".into(),
+        images: vec![],
+        chip_elements: vec![],
+        scrollback_entry: crate::scrollback::EntryId::new(1),
+        combined_scrollback_entries: vec![],
+        admission_resolved: None,
+        frozen_skill_selection: None,
+        expected_turn_id: None,
+    });
+    let reject = |sid, pid: &str| {
+        Action::TaskComplete(TaskResult::PromptSessionMissing {
+            agent_id: id,
+            session_id: sid,
+            prompt_id: pid.into(),
+        })
+    };
+    assert!(dispatch(reject(sid.clone(), "old"), &mut app).is_empty());
+    assert!(dispatch(reject(acp::SessionId::new("other"), prompt_id), &mut app).is_empty());
+    let effects = dispatch(reject(sid.clone(), prompt_id), &mut app);
+    let [
+        Effect::ResyncSession {
+            session_id,
+            cwd: load_cwd,
+            generation,
+            timeout: None,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected one session/load, got {effects:?}");
+    };
+    assert_eq!(session_id, &sid);
+    assert_eq!(load_cwd, &cwd);
+    assert_eq!(app.agents[&id].prompt.text(), "continue here");
+    assert!(dispatch(reject(sid.clone(), prompt_id), &mut app).is_empty());
+    let completed = dispatch(
+        Action::TaskComplete(TaskResult::SessionResynced {
+            agent_id: id,
+            session_id: sid,
+            generation: *generation,
+            result: Ok(None),
+            models: None,
+            descendant_ownership: None,
+            behavior: None,
+            scheduler_snapshot: None,
+        }),
+        &mut app,
+    );
+    assert!(!completed.iter().any(|effect| matches!(
+        effect,
+        Effect::SendPrompt { .. }
+            | Effect::SendPromptBlocks { .. }
+            | Effect::SendBashCommand { .. }
+    )));
+    assert!(app.agents[&id].session_reload.is_none());
+    assert_eq!(app.agents[&id].prompt.text(), "continue here");
+}

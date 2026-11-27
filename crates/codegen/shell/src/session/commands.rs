@@ -133,6 +133,26 @@ pub enum DesiredStateOutcome<T> {
     Superseded,
 }
 
+const SESSION_NOT_RESIDENT: &str = "session_not_resident";
+
+/// The request was rejected at handle lookup, before reaching an actor.
+pub fn session_not_resident_error() -> acp::Error {
+    acp::Error::invalid_params().data(serde_json::json!({
+        "error_kind": SESSION_NOT_RESIDENT,
+        "message": "unknown session id",
+    }))
+}
+
+pub fn is_session_not_resident_error(error: &acp::Error) -> bool {
+    error.code == acp::ErrorCode::InvalidParams
+        && error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("error_kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some(SESSION_NOT_RESIDENT)
+}
+
 const CONTROL_TERMINAL_PUBLISHED_KEY: &str = "grow/controlTerminalPublished";
 
 /// Mark an ACP control error whose actor-owned terminal projection has already

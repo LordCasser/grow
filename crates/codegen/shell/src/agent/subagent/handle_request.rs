@@ -624,10 +624,16 @@ async fn run_shell_child_inner(
             return child_run_output(failure_result(&request, &msg), completion_data);
         }
         match durable_resume_source_for(
-            resume_id,
-            &ctx.parent_session_id,
-            &ctx.security_parent_session_id,
-        ) {
+            crate::util::grow_home::grow_home(),
+            resume_id.to_owned(),
+            ctx.parent_session_id.clone(),
+            ctx.security_parent_session_id.clone(),
+            ctx.parent_chat_state
+                .clone()
+                .map(|state| (ctx.parent_journal.clone(), state)),
+        )
+        .await
+        {
             Ok(info) => Some(info),
             Err(error) => {
                 tracing::warn!(
@@ -642,10 +648,13 @@ async fn run_shell_child_inner(
     } else {
         None
     };
+    let (resume_source, resume_initial) = resume_source
+        .map(|source| (source.data, source.initial))
+        .unzip();
     if let Some(ref source) = resume_source {
         if let Err(e) = crate::agent::subagent::resolution::validate_resume_identity(
             &request.subagent_type,
-            &source.data,
+            source,
         ) {
             return child_run_output(failure_result(&request, &e.to_string()), completion_data);
         }
@@ -965,10 +974,7 @@ async fn run_shell_child_inner(
     }
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
-    let override_cwd = select_override_cwd(
-        resume_source.as_ref().map(|source| &source.data),
-        request.cwd.as_deref(),
-    );
+    let override_cwd = select_override_cwd(resume_source.as_ref(), request.cwd.as_deref());
     let effective_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd)
         .to_string_lossy()
         .into_owned();
@@ -1024,7 +1030,7 @@ async fn run_shell_child_inner(
     } else {
         match bootstrap_initial_context(
             &request,
-            resume_source.as_ref(),
+            resume_initial,
             &ctx,
             effective_sampling_config.context_window,
         )
@@ -1365,13 +1371,10 @@ async fn run_shell_child_inner(
     }
 
     let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
-    // The frozen cut is needed only for bootstrap and worktree planning, not
-    // for the lifetime of the derived child execution.
-    drop(resume_source);
     let mut restored_control = None;
     let mut restored_signals = None;
     let mut restored_workflow_runs = Vec::new();
-    let (persistence, child_timeline, child_history, child_session_directory) =
+    let (persistence, child_timeline, child_history, child_session_directory, seed_history_bytes) =
         if let Some((loaded, persistence)) = restored_persistence.take() {
             restored_control = loaded.control_snapshot;
             restored_signals = loaded.signals;
@@ -1381,6 +1384,7 @@ async fn run_shell_child_inner(
                 loaded.timeline,
                 loaded.history,
                 loaded.session_directory,
+                None,
             )
         } else {
             match session::persistence::new_child(
@@ -1404,11 +1408,12 @@ async fn run_shell_child_inner(
             )
             .await
             {
-                Ok((persistence, timeline, directory)) => (
+                Ok((persistence, timeline, directory, seed_history_bytes)) => (
                     persistence,
                     timeline,
                     crate::session::history::HistorySnapshot::default(),
                     directory,
+                    seed_history_bytes,
                 ),
                 Err(e) => {
                     if chat_state::persistence_error_is_permanent(&e) {
@@ -1948,6 +1953,12 @@ async fn run_shell_child_inner(
             &ctx.parent_session_id,
             SessionUpdate::SubagentSpawned {
                 subagent_id: subagent_id.clone(),
+                spawn_details: Some(SubagentSpawnDetails::from_spawn(
+                    &spawn,
+                    seed_history_bytes.map_or(SubagentSpawnHistory::Empty, |seed_history_bytes| {
+                        SubagentSpawnHistory::Inherited { seed_history_bytes }
+                    }),
+                )),
                 child_session_id: child_session_id.0.to_string(),
                 parent_session_id: ctx.parent_session_id.clone(),
                 parent_prompt_id: request.parent_prompt_id.clone(),

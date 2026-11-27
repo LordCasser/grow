@@ -542,6 +542,11 @@ impl MvpAgent {
                     ?exit,
                     "Session actor exited unexpectedly; reaping as DeadFailed"
                 );
+                ::diagnostics::unified_log::warn(
+                    "shell.session.actor_exited",
+                    Some(id.0.as_ref()),
+                    Some(serde_json::json!({ "exit": format!("{exit:?}"), "resident": was_resident })),
+                );
                 self.reap_dead_session(&id);
             } else {
                 self.session_live_state.borrow_mut().remove(&id);

@@ -584,6 +584,15 @@ context_window = 128000
             };
             let mut receipt =
                 respond_to.expect("real bootstrap must request publication, not mailbox admission");
+            let crate::extensions::notification::SessionUpdate::SubagentSpawned {
+                spawn_details: Some(details), ..
+            } = &notification.update else {
+                panic!("live launch must carry the committed spawn details");
+            };
+            assert_eq!(details.prompt, "Read fixture.txt and finish.");
+            assert_eq!(std::path::Path::new(&details.child_cwd), cwd);
+            assert!(details.worktree_path.is_none());
+            assert_eq!(details.history, crate::extensions::notification::SubagentSpawnHistory::Empty);
             let child = agent
                 .active_child_sessions
                 .borrow()

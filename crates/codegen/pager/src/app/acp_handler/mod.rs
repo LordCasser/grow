@@ -868,8 +868,6 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
 }
 
 fn handle_leader_resync_required(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
-    static NEXT_RESYNC_GENERATION: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(1 << 63);
     let Ok(params) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
         return false;
     };
@@ -881,25 +879,36 @@ fn handle_leader_resync_required(notif: &acp::ExtNotification, app: &mut AppView
     };
     let agent_id = matched.agent_id();
     let is_active = is_matched_agent_active(app, agent_id);
-    let Some(agent) = app.agents.get_mut(&agent_id) else {
-        return false;
-    };
-    let Some(root_session_id) = agent.session.session_id.clone() else {
-        return false;
-    };
+    if let Some(effect) =
+        session_resync_effect(app, agent_id, Some(std::time::Duration::from_secs(30)))
+    {
+        app.pending_effects.push(effect);
+    }
+    is_active
+}
+
+pub(crate) fn session_resync_effect(
+    app: &mut AppView,
+    agent_id: AgentId,
+    timeout: Option<std::time::Duration>,
+) -> Option<Effect> {
+    static NEXT_RESYNC_GENERATION: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1 << 63);
+    let agent = app.agents.get_mut(&agent_id)?;
+    let session_id = agent.session.session_id.clone()?;
     let cwd = agent.session.cwd.clone();
     let permission_mode = agent.session.permission_mode();
     let generation = NEXT_RESYNC_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     agent.begin_session_resync(generation);
     crate::minimal_api::restart_minimal_transcript_after_reload(app, &[agent_id]);
-    app.pending_effects.push(Effect::ResyncSession {
+    Some(Effect::ResyncSession {
         agent_id,
-        session_id: root_session_id,
+        session_id,
         cwd,
         generation,
+        timeout,
         permission_mode,
-    });
-    is_active
+    })
 }
 
 /// Handle `grow/session/interjection` — the leader broadcasts this

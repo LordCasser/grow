@@ -636,6 +636,7 @@ fn resync_ownership_is_consumed_only_after_matching_generation_finishes() {
                         session_id: acp::SessionId::new(root_sid),
                         generation,
                         result: Ok(None),
+                        models: None,
                         descendant_ownership: Some(captured.clone()),
                         behavior: None,
                         scheduler_snapshot: None,

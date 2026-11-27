@@ -1319,6 +1319,9 @@ pub enum Effect {
     },
     /// Read descendant lifecycle/history off the reducer path after the root
     /// session is ready.
+    ReadChildSeedHistory {
+        request: crate::app::subagent::ChildSeedHistoryRequest,
+    },
     RestoreDescendantState {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1371,6 +1374,8 @@ pub enum Effect {
         session_id: acp::SessionId,
         cwd: std::path::PathBuf,
         generation: u64,
+        /// Resident delivery repair is bounded; a cold journal load follows ordinary resume.
+        timeout: Option<std::time::Duration>,
         permission_mode: shell::util::config::PermissionMode,
     },
     /// Fetch session list for the welcome screen session picker.
@@ -2184,6 +2189,7 @@ pub enum ControlRpcOutcome {
 /// Transport/application failure for a control request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlRequestFailure {
+    pub session_missing: bool,
     pub message: String,
     /// The Shell actor already owns a durable Rejected notice for this failure.
     pub terminal_published: bool,
@@ -2344,6 +2350,10 @@ pub enum TaskResult {
         behavior: Option<shell::extensions::notification::BehaviorProjection>,
         scheduler_snapshot: Option<shell::extensions::notification::SchedulerLoadSnapshot>,
     },
+    ChildSeedHistoryLoaded {
+        request: crate::app::subagent::ChildSeedHistoryRequest,
+        result: Result<Box<crate::scrollback::state::ScrollbackState>, String>,
+    },
     DescendantStateRestored {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -2394,6 +2404,7 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         generation: u64,
         result: Result<Option<crate::app::prompt_queue::ForegroundSnapshot>, String>,
+        models: Option<shell::agent::models::SessionModelState>,
         descendant_ownership: Option<shell::session::storage::DescendantOwnership>,
         behavior: Option<shell::extensions::notification::BehaviorProjection>,
         scheduler_snapshot: Option<shell::extensions::notification::SchedulerLoadSnapshot>,
@@ -2467,6 +2478,11 @@ pub enum TaskResult {
         session_id: String,
         generation: u64,
         detail: crate::app::root::CardDetail,
+    },
+    PromptSessionMissing {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        prompt_id: String,
     },
     /// Prompt response received (turn ended).
     PromptResponse {

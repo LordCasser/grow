@@ -1,6 +1,6 @@
 //! ScrollbackEntry - wraps a block with display state.
 
-use std::cell::{Ref, RefCell};
+use std::cell::{OnceCell, Ref, RefCell};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
@@ -134,7 +134,7 @@ pub struct ScrollbackEntry {
     /// Display width of each source line. Width-independent, so unlike every
     /// other cache here it survives a resize — re-deriving it per width is what
     /// made a resize cost O(total conversation bytes).
-    cached_line_widths: RefCell<Option<Vec<u32>>>,
+    cached_line_widths: OnceCell<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,7 +200,7 @@ impl ScrollbackEntry {
             cached_output: RefCell::new(None),
             cached_truncated_height: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
-            cached_line_widths: RefCell::new(None),
+            cached_line_widths: OnceCell::new(),
         }
     }
 
@@ -232,7 +232,7 @@ impl ScrollbackEntry {
             cached_output: RefCell::new(None),
             cached_truncated_height: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
-            cached_line_widths: RefCell::new(None),
+            cached_line_widths: OnceCell::new(),
         }
     }
 
@@ -299,7 +299,7 @@ impl ScrollbackEntry {
     /// Invalidate cached output after a content change.
     pub fn invalidate_cache(&mut self) {
         self.invalidate_width_caches();
-        *self.cached_line_widths.borrow_mut() = None;
+        self.cached_line_widths.take();
     }
 
     /// Invalidate only the caches keyed by terminal width — the resize path.
@@ -344,8 +344,19 @@ impl ScrollbackEntry {
     /// independent of whether presentation has been materialized. On-screen
     /// entries are always measured exactly.
     pub fn estimate_source_lines(&self, content_width: u16) -> u16 {
-        let mut slot = self.cached_line_widths.borrow_mut();
-        let widths = slot.get_or_insert_with(|| {
+        wrapped_lines_from_widths(self.source_line_widths(), content_width)
+    }
+
+    /// Seed projection can measure source text before it reaches the UI. The
+    /// same profile serves every terminal width, including after a resize.
+    pub(crate) fn prepare_source_line_widths(&self) {
+        if self.display_mode == DisplayMode::Expanded || !self.is_foldable() {
+            self.source_line_widths();
+        }
+    }
+
+    fn source_line_widths(&self) -> &[u32] {
+        self.cached_line_widths.get_or_init(|| {
             let text = match &self.block {
                 RenderBlock::AgentMessage(block) => Some(block.text()),
                 RenderBlock::Thinking(block) => Some(block.text()),
@@ -359,13 +370,12 @@ impl ScrollbackEntry {
             text.split('\n')
                 .map(|line| unicode_width::UnicodeWidthStr::width(line) as u32)
                 .collect()
-        });
-        wrapped_lines_from_widths(widths, content_width)
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn has_cached_line_widths(&self) -> bool {
-        self.cached_line_widths.borrow().is_some()
+        self.cached_line_widths.get().is_some()
     }
 
     /// Whether this entry's laid-out output is cached. Lazy-layout tests use this

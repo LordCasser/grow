@@ -2515,3 +2515,42 @@ ContextRecall parent validation SHALL reconstruct the frozen branch at the reque
 #### Scenario: The journal reader omits diagnostics during index migration
 - **WHEN** the reader has validated a parent journal through the frozen frontier and removes diagnostic observations from its in-memory branch
 - **THEN** recall validates the same revision, live coordinates and unloaded transcript leaves as dense replay. Unavailable frontiers, invalid coordinates and mismatched manifests still fail validation.
+
+### Requirement: Subagent resume source validation yields the Shell executor
+
+Shell SHALL keep its command executor available while validating a delegated resume source in storage. The derived child SHALL await the complete source checks before admission.
+
+#### Scenario: Resume reads a large source lineage
+- **WHEN** a derived child requests a stored resume source whose validation takes time
+- **THEN** independent executor work can proceed during the storage read, and the child still requires the matching parent Spawn and Ended, authorized identity, and verified child result link before launch.
+
+### Requirement: Delegated resume uses targeted lifecycle proof and indexed source recovery
+Shell SHALL resolve a resume_from source by searching the owning parent's committed lifecycle facts for the requested delegation newest-first. For an indexed lifecycle lookup, unrelated published parent history SHALL stay on disk. If the committed suffix needs execution state to validate and no matching resident writer cut is available, Shell SHALL validate it through ordinary working-state recovery before looking up the delegation. The source child SHALL use the same validated working cut and canonical references as ordinary indexed resume to recover its effective model, Surface, inherited presentation and required evidence. A missing usable publication SHALL preserve canonical recovery and all existing authorization and result-link checks.
+
+#### Scenario: Several children resume under one long-lived parent
+- **WHEN** requests identify different completed delegations in a published parent, including lifecycle records in the committed suffix
+- **THEN** each request resolves its exact spawn and matching terminal, checks the requesting owner, and binds the child seed and result without materializing the full published parent conversation.
+
+#### Scenario: Source child has extensive closed history
+- **WHEN** a resumed child has a usable working publication and a validated suffix
+- **THEN** the derived child receives the full eligible conversation and ordered inherited display, current model route and exact result proof, without replaying unrelated published execution history.
+
+#### Scenario: Evidence is incomplete or invalid
+- **WHEN** indexed recovery cannot establish a valid source cut or the parent and child facts disagree
+- **THEN** the existing canonical recovery and rejection rules apply, preserving source identity, validation errors and the original session.
+
+### Requirement: Ordinary persistence acknowledgements preserve the resident writer
+
+An ordinary Timeline append without a caller deadline SHALL remain owned by the original writer while its persistence acknowledgement is outstanding. The writer SHALL serialize later facts behind it, accept a durable success exactly once, and admit subsequent facts on the same writer. A confirmed permanent error SHALL still close the affected writer. Retry dispatch following reported failures or a lost acknowledgement SHALL remain bounded.
+
+#### Scenario: The Shell persistence queue stalls during a delegated resume
+- **WHEN** an ordinary foreground write waits more than 30 seconds for a live acknowledgement while the persistence worker is delayed
+- **THEN** the original writer retains the pending identity, sends no duplicate or subsequent record during the delay, then accepts a successful acknowledgement and continues at the next sequence without reloading the session.
+
+#### Scenario: A bounded operation expires while waiting in the mailbox
+- **WHEN** the operation deadline has already elapsed before its first append is submitted
+- **THEN** the caller receives a deadline error, no storage request is submitted, and the same writer can use the next sequence for another operation.
+
+#### Scenario: A bounded barrier has an unresolved write at its deadline
+- **WHEN** an explicit barrier has submitted its write and the acknowledgement is still outstanding when its caller deadline expires
+- **THEN** the caller receives a deadline error and the original pending identity remains available for reconciliation without admitting a competing write.

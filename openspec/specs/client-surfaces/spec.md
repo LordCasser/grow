@@ -5678,3 +5678,42 @@ Skill rows SHALL preserve the requested identity, resource and terminal outcome 
 #### Scenario: Qualified names and failed or unpublished loads
 - **WHEN** two namespaces provide the same short skill name, or the loader rejects a request or cancels an unpublished group member
 - **THEN** terminal rows retain their distinct requested identities, and the failed or cancelled load exposes the corresponding outcome and reason.
+
+### Requirement: Live subagent launch does not reread parent history
+
+Pager SHALL establish the live child route, task prompt, effective workspace and worktree state from the published canonical spawn details without reading the parent Timeline on its event loop. A newly published child without inherited display history SHALL accept its first live input without opening child history. Child control publication and first-prompt admission retain their existing order.
+
+#### Scenario: Ordinary child launches in a long conversation
+- **WHEN** Shell publishes a new child or a context fork with no inherited display history before the first child prompt
+- **THEN** Pager creates the child view with its published task and workspace, without a synchronous parent or child history read.
+
+#### Scenario: Derived or historical child has earlier presentation
+- **WHEN** a derived child inherits a transcript or Pager is reconstructing an existing child
+- **THEN** its previous presentation remains available in order, and an omitted live detail does not classify historical child state as an empty transcript.
+
+### Requirement: Live resumed child history loads without blocking interaction
+Pager SHALL project a live resumed child's immutable inherited transcript off the interface thread while the parent, child and siblings remain interactive. The inherited display precedes the live tail and SHALL be installed once for the matching child binding.
+
+#### Scenario: Live output arrives while inherited history is being read
+- **WHEN** a newly resumed child receives its first prompt, produces output or finishes before its inherited display is ready
+- **THEN** the live updates remain available and retain their identities and order when the inherited prefix is installed.
+
+#### Scenario: Child binding retires or history fails
+- **WHEN** a delayed inherited history result arrives after the owning view is retired or the journal cannot be read
+- **THEN** another binding cannot acquire the result and a read error leaves the child's live output available with a retry path.
+
+### Requirement: An open primary session recovers from a missing runtime handle
+
+Pager SHALL start one ordinary in-place session load for the bound primary session when a current user prompt or model selection receives Shell's pre-admission invalid-params rejection tagged `error_kind=session_not_resident`. It SHALL retain recoverable input for explicit retry and surface load failures. A stale response, other application error, or child control failure SHALL NOT initiate a replacement root load.
+
+#### Scenario: A long-lived tab outlives its actor
+- **WHEN** Shell rejects the current prompt or model request for the open primary session because its handle is absent
+- **THEN** Pager loads the same session and cwd through its existing replay window, preserves the rejected draft when applicable and does not automatically submit that input again.
+
+#### Scenario: An already recovering or changed view receives a rejection
+- **WHEN** a rejection belongs to an obsolete prompt, control token or different session, or the matching view is already reloading
+- **THEN** Pager does not start another load for that result.
+
+#### Scenario: Session info is unavailable
+- **WHEN** Shell returns a session-info status with no display payload
+- **THEN** Pager displays that lookup outcome and the reported reason when present; malformed payloads remain errors.

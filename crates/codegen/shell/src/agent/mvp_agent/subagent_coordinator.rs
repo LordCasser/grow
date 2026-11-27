@@ -638,6 +638,7 @@ impl MvpAgent {
             )
         };
         Some(crate::agent::subagent::SubagentSpawnContext {
+            parent_journal: self.sessions.borrow().get(&parent_sid)?.writer_journal.clone(),
             storage_admission: self.storage_admission.clone(),
             parent_control_epoch,
             sampling_output_delivery: self

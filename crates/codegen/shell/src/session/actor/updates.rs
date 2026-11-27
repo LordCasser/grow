@@ -1652,6 +1652,7 @@ mod grow_event_id_stamping_tests {
                             session_id: actor.session_info.id.clone(),
                             update: GrowSessionUpdate::SubagentSpawned {
                                 subagent_id: "child-1".into(),
+                                spawn_details: None,
                                 parent_session_id: actor.session_info.id.to_string(),
                                 parent_prompt_id: None,
                                 child_session_id: "child-1".into(),

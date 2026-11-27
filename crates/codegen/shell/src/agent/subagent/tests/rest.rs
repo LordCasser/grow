@@ -2,6 +2,37 @@
 use super::*;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway};
 use tools::implementations::grow_build::task::backend::ChannelBackend;
+
+#[test]
+fn resume_source_validation_yields_the_local_executor() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let home = tempfile::tempdir().unwrap();
+        let (started, occupied) = oneshot::channel();
+        let (release, wait) = oneshot::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = wait.blocking_recv();
+        });
+        occupied.await.unwrap();
+        let validation = durable_resume_source_for(
+            home.path().to_owned(),
+            "source".into(),
+            "parent".into(),
+            "parent".into(),
+            None,
+        );
+        tokio::pin!(validation);
+        assert!(futures_util::poll!(&mut validation).is_pending());
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        assert!(matches!(validation.await, Err(DurableResumeSourceError::ParentMissing)));
+    });
+}
+
 #[test]
 fn suspension_retirement_ack_remains_idempotent_while_other_children_drain() {
     let thread = crate::session::SessionThread::from_handle(
@@ -585,6 +616,150 @@ fn resume_rejects_conflicting_subagent_type() {
         );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn resume_parent_matches_delegation_id_across_publication_and_validates_tail() {
+    use crate::session::storage::{JsonlStorageAdapter, StorageAdapter as _};
+    use chat_state::{SubagentEvent, TimelineEventKind};
+    use std::io::Write as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = JsonlStorageAdapter::with_root(root.path().to_owned());
+    let info = SessionInfo {
+        id: acp::SessionId::new("parent-session"),
+        cwd: "/workspace".into(),
+    };
+    let spawn = recovery_spawn("delegation", "child-session");
+    let summary =
+        session::persistence::Summary::new(&info, session::persistence::default_model_id())
+            .unwrap();
+    let (_, mut timeline, _) = storage
+        .init_session_with_summary(
+            &info,
+            summary,
+            vec![],
+            Default::default(),
+            Default::default(),
+            vec![TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                Box::new(spawn.clone()),
+            ))],
+        )
+        .await
+        .unwrap();
+    let observer = JsonlStorageAdapter::with_root(root.path().to_owned());
+    let opened = observer
+        .open_session_by_id_shared_read("parent-session")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        opened
+            .resume_subagent_operation("delegation", None)
+            .unwrap(),
+        timeline.subagent_operation("delegation").unwrap()
+    );
+    assert!(
+        opened
+            .resume_subagent_operation("child-session", None)
+            .unwrap()
+            .is_none()
+    );
+    let terminal = timeline
+        .record(TimelineEventKind::Subagent(SubagentEvent::Ended(
+            chat_state::SubagentTerminalEvent {
+                subagent_id: spawn.subagent_id,
+                child_session_id: spawn.child_session_id,
+                outcome: chat_state::SubagentOutcome::Cancelled,
+                duration_ms: 41,
+                tool_calls: 2,
+                turns: 1,
+                tokens_used: 73,
+                error: Some("cancelled".into()),
+                result_ref: None,
+                snapshot_ref: None,
+            },
+        )))
+        .unwrap();
+    storage
+        .append_timeline_event_durable(&info, &terminal)
+        .await
+        .unwrap();
+    let expected = timeline.subagent_operation("delegation").unwrap();
+    assert_eq!(
+        opened
+            .resume_subagent_operation("delegation", None)
+            .unwrap(),
+        expected
+    );
+    let journal = storage.writer_journal(&info).unwrap();
+    let proof = || {
+        timeline
+            .subagent_operation_at_cut("delegation")
+            .unwrap()
+            .unwrap()
+    };
+    let mut stale = proof();
+    stale.next_seq = chat_state::EventSeq::new(0);
+    let mut mismatched = proof();
+    mismatched.operation.1.prompt.push_str(" changed");
+    for candidate in [proof(), stale, mismatched] {
+        let owner = (journal.clone(), candidate);
+        assert_eq!(
+            opened
+                .resume_subagent_operation("delegation", Some(&owner))
+                .unwrap(),
+            expected
+        );
+        assert!(
+            opened
+                .resume_subagent_operation("other", Some(&owner))
+                .unwrap()
+                .is_none()
+        );
+    }
+    drop(storage);
+    assert_eq!(
+        opened
+            .resume_subagent_operation("delegation", None)
+            .unwrap(),
+        expected
+    );
+
+    let path = opened.directory().display_path().join("timeline.jsonl");
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let complete = journal.metadata().unwrap().len();
+    journal.write_all(b"{").unwrap();
+    assert_eq!(
+        opened
+            .resume_subagent_operation("delegation", None)
+            .unwrap(),
+        expected
+    );
+    journal.set_len(complete).unwrap();
+
+    // A second terminal has a valid journal checksum and contiguous sequence.
+    // The published and unpublished lifecycles still admit only one terminal.
+    let mut duplicate = terminal;
+    duplicate.seq = timeline.next_seq();
+    let event = serde_json::value::to_raw_value(&duplicate).unwrap();
+    let physical = std::fs::read(&path)
+        .unwrap()
+        .split_inclusive(|byte| *byte == b'\n')
+        .count();
+    journal
+        .write_all(&session::history::encode_domain(physical as u64, &event, None).unwrap())
+        .unwrap();
+    assert_eq!(
+        opened
+            .resume_subagent_operation("delegation", None)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
 #[test]
 fn durable_resume_projection_requires_parent_terminal_fact() {
     let mut timeline = chat_state::Timeline::default();
@@ -628,11 +803,11 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
         .unwrap();
     assert!(resume_source_from_timeline(&timeline, "sa-resume").is_none());
     assert_eq!(
-        resume_source_facts_from_timeline(&timeline, "sa-resume").unwrap_err(),
+        completed_resume_operation(timeline.subagent_operation("sa-resume").unwrap()).unwrap_err(),
         DurableResumeSourceError::TerminalMissing,
     );
     assert_eq!(
-        resume_source_facts_from_timeline(&timeline, "unknown-source").unwrap_err(),
+        completed_resume_operation(timeline.subagent_operation("unknown-source").unwrap()).unwrap_err(),
         DurableResumeSourceError::SpawnMissing,
     );
     timeline
@@ -652,7 +827,7 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
         ))
         .unwrap();
     let source = resume_source_from_timeline(&timeline, "sa-resume").unwrap();
-    assert!(resume_source_facts_from_timeline(&timeline, "sa-resume").is_ok());
+    assert!(completed_resume_operation(timeline.subagent_operation("sa-resume").unwrap()).is_ok());
     assert_eq!(source.child_session_id, "child-resume");
     assert_eq!(source.child_cwd, "/workspace/project");
     assert_eq!(source.worktree_path.as_deref(), Some(Path::new("/tmp/worktree")));
@@ -728,6 +903,7 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
 
     let SessionUpdate::SubagentSpawned {
         subagent_id,
+        spawn_details: Some(details),
         child_session_id,
         parent_session_id,
         parent_prompt_id,
@@ -750,6 +926,10 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
         panic!("expected subagent spawn projection");
     };
     assert_eq!(subagent_id, "sa-projection");
+    assert_eq!(details.prompt, "review all features");
+    assert_eq!(details.child_cwd, "/workspace/project");
+    assert_eq!(details.worktree_path.as_deref(), Some("/tmp/worktree"));
+    assert_eq!(details.history, SubagentSpawnHistory::Durable);
     assert_eq!(child_session_id, "child-projection");
     assert_eq!(parent_session_id, "parent-session");
     assert_eq!(parent_prompt_id.as_deref(), Some("prompt-9"));
@@ -850,6 +1030,7 @@ fn provenance_carries_resumed_from() {
 fn notification_subagent_spawned_includes_resumed_from() {
     let notification = SessionUpdate::SubagentSpawned {
         subagent_id: "sa-resumed".into(),
+        spawn_details: None,
         parent_session_id: "parent".into(),
         parent_prompt_id: Some("prompt-1".into()),
         child_session_id: "child-resumed".into(),
@@ -874,6 +1055,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
     assert_eq!(json["model"], serde_json::Value::Null);
     let fresh = SessionUpdate::SubagentSpawned {
         subagent_id: "sa-fresh".into(),
+        spawn_details: None,
         parent_session_id: "p".into(),
         parent_prompt_id: None,
         child_session_id: "c".into(),

@@ -3,6 +3,7 @@ use super::*;
 fn spawned() -> SessionUpdate {
     SessionUpdate::SubagentSpawned {
         subagent_id: "child".into(),
+        spawn_details: None,
         parent_session_id: "parent".into(),
         parent_prompt_id: None,
         child_session_id: "child".into(),

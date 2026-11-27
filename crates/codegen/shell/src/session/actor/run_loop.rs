@@ -1463,11 +1463,19 @@ pub(super) async fn run_session(
                     let state = session.state.lock().await;
                     state.foreground.identity(&prompt_id).map(|(origin, _)| origin)
                 };
-                if result
-                    .as_ref()
-                    .err()
-                    .is_some_and(crate::session::commands::is_fatal_turn_boundary_error)
+                if let Err(error) = &result
+                    && crate::session::commands::is_fatal_turn_boundary_error(error)
                 {
+                    let data = error.data.as_ref();
+                    ::diagnostics::unified_log::error(
+                        "shell.session.fatal_turn_boundary",
+                        Some(session.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "prompt_id": prompt_id,
+                            "phase": data.and_then(|value| value.get("phase")),
+                            "persistence_kind": data.and_then(|value| value.pointer("/persistenceFailure/kind")),
+                        })),
+                    );
                     tracing::error!(
                         prompt_id,
                         "closing session after fatal Timeline turn-boundary failure"

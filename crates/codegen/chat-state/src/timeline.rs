@@ -2110,6 +2110,13 @@ pub enum ToolHistoryState {
 
 pub type SubagentOperation = (EventSeq, SubagentSpawnEvent, Option<SubagentTerminalEvent>);
 
+/// Positions in the same validated actor cut as the returned lifecycle facts.
+pub struct SubagentOperationAtCut {
+    pub next_seq: EventSeq,
+    pub terminal_seq: Option<EventSeq>,
+    pub operation: SubagentOperation,
+}
+
 #[derive(Debug, Clone, Default)]
 struct LifecycleFold {
     replaying_working_prefix: bool,
@@ -2543,6 +2550,20 @@ impl ControlContexts {
 }
 
 impl SurfaceCheckpoint {
+    /// Store item bodies independently from the small branch and projection metadata.
+    pub fn take_items(&mut self) -> Vec<ConversationItem> {
+        std::mem::take(&mut self.items)
+    }
+
+    /// Restore exactly one body in published Surface order for each identity.
+    pub fn load_items<E>(
+        &mut self,
+        load: impl FnMut(usize) -> Result<ConversationItem, E>,
+    ) -> Result<(), E> {
+        self.items = (0..self.ids.len()).map(load).collect::<Result<_, _>>()?;
+        Ok(())
+    }
+
     /// Install the Surface after the canonical projector has accepted an image
     /// transformation. The image operation does not change pending skill loads.
     pub fn accept_projected_image_surface(&mut self, projected: &Timeline) {
@@ -3204,7 +3225,7 @@ impl Timeline {
     }
 
     /// Original lifecycle facts in ledger order, without traversing conversation events.
-    pub fn subagent_lifecycle_events(&self) -> impl Iterator<Item = &TimelineEvent> {
+    pub fn subagent_lifecycle_events(&self) -> impl DoubleEndedIterator<Item = &TimelineEvent> {
         self.subagent_lifecycle_positions
             .iter()
             .map(|&position| &self.events[position])
@@ -3249,24 +3270,40 @@ impl Timeline {
         &self,
         subagent_id: &str,
     ) -> Result<Option<SubagentOperation>, TimelineError> {
+        Ok(self
+            .subagent_operation_at_cut(subagent_id)?
+            .map(|cut| cut.operation))
+    }
+
+    pub fn subagent_operation_at_cut(
+        &self,
+        subagent_id: &str,
+    ) -> Result<Option<SubagentOperationAtCut>, TimelineError> {
         let mut spawn = None;
         let mut terminal = None;
-        for event in self.subagent_lifecycle_events() {
+        for event in self.subagent_lifecycle_events().rev() {
             match &event.kind {
                 TimelineEventKind::Subagent(SubagentEvent::Spawned(candidate))
                     if candidate.subagent_id == subagent_id =>
                 {
                     spawn = Some((event.seq, candidate.as_ref().clone()));
+                    break;
                 }
                 TimelineEventKind::Subagent(SubagentEvent::Ended(candidate))
                     if candidate.subagent_id == subagent_id =>
                 {
-                    terminal = Some(candidate.clone());
+                    terminal = Some((event.seq, candidate.clone()));
                 }
                 _ => {}
             }
         }
         let frontier = self.next_seq();
+        let terminal = match terminal {
+            Some(terminal) => Some(terminal),
+            None => self
+                .lifecycle
+                .archived_subagent_terminal(subagent_id, frontier)?,
+        };
         let spawn = match spawn {
             Some(spawn) => Some(spawn),
             None => self
@@ -3276,14 +3313,12 @@ impl Timeline {
         let Some((seq, spawn)) = spawn else {
             return Ok(None);
         };
-        let terminal = match terminal {
-            Some(terminal) => Some(terminal),
-            None => self
-                .lifecycle
-                .archived_subagent_terminal(subagent_id, frontier)?
-                .map(|(_, terminal)| terminal),
-        };
-        Ok(Some((seq, spawn, terminal)))
+        let (terminal_seq, terminal) = terminal.unzip();
+        Ok(Some(SubagentOperationAtCut {
+            next_seq: frontier,
+            terminal_seq,
+            operation: (seq, spawn, terminal),
+        }))
     }
 
     pub fn events(&self) -> &[TimelineEvent] {

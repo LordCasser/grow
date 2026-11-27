@@ -625,7 +625,7 @@ pub fn commit_active(
     // Hold commits while a centered fullscreen app-modal (settings) is open: it
     // takes the whole live region, so an `insert_before` underneath it would
     // scroll the popup. Deferred commits flush on the next frame after it closes.
-    if super::overlay::app_modal_active(agent) || minimal_api::agent_session_reload_active(agent) {
+    if super::overlay::app_modal_active(agent) || minimal_api::agent_native_history_pending(agent) {
         return false;
     }
     // NB: `sync_pending_user_input_marks` already ran at the top of the frame
@@ -745,7 +745,7 @@ pub fn expand_pending(
     match minimal_api::app_visible_agent(app, id) {
         Some(agent)
             if !super::overlay::app_modal_active(agent)
-                && !minimal_api::agent_session_reload_active(agent) => {}
+                && !minimal_api::agent_native_history_pending(agent) => {}
         _ => return,
     }
     let theme = Theme::current();

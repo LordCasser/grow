@@ -966,6 +966,7 @@ fn handle_session_notification_inner(
         }
         GrowSessionUpdate::SubagentSpawned {
             subagent_id,
+            spawn_details,
             child_session_id,
             subagent_type,
             description,
@@ -1051,6 +1052,8 @@ fn handle_session_notification_inner(
                         };
                         Some((entry_id, status.to_string(), elapsed, error))
                     });
+            use shell::extensions::notification::SubagentSpawnHistory;
+            let birth_history = spawn_details.as_ref().map(|details| details.history);
             let incoming = SubagentInfo {
                 subagent_id: Arc::from(subagent_id),
                 child_session_id: Arc::from(child_session_id.clone()),
@@ -1086,9 +1089,15 @@ fn handle_session_notification_inner(
                 pending_kill: false,
                 kill_requested_at: None,
                 scrollback_entry_id: None,
-                prompt: None,
-                child_cwd: None,
-                worktree_path: None,
+                prompt: spawn_details
+                    .as_ref()
+                    .map(|details| Arc::from(details.prompt.as_str())),
+                child_cwd: spawn_details
+                    .as_ref()
+                    .map(|details| Arc::from(details.child_cwd.as_str())),
+                worktree_path: spawn_details
+                    .and_then(|details| details.worktree_path)
+                    .map(Arc::from),
                 child_updates_replayed: false,
                 history_unavailable: false,
             };
@@ -1112,19 +1121,6 @@ fn handle_session_notification_inner(
                     .session
                     .subagent_sessions
                     .insert(child_session_id.clone(), incoming);
-            }
-            // Replay hydration is batched by `restore_descendant_state` after
-            // load. Reading the same parent Timeline here would make resume
-            // O(child count × Timeline size).
-            if !meta.is_replay
-                && let Some(ref sid) = agent.session.session_id
-                && let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id)
-            {
-                crate::app::subagent::enrich_from_timeline(
-                    info,
-                    &agent.session.cwd,
-                    sid.0.as_ref(),
-                );
             }
             let (effective_child_cwd, effective_is_worktree) = derive_child_cwd(
                 &agent.session.cwd,
@@ -1216,22 +1212,29 @@ fn handle_session_notification_inner(
                 .subagent_sessions
                 .get(&child_session_id)
                 .is_some_and(|info| info.child_updates_replayed);
-            if forced_descendant_owner.is_none()
-                && !agent.session.loading_replay
-                && !child_updates_replayed
-            {
-                let replayed =
-                    agent
+            if forced_descendant_owner.is_none() && !child_updates_replayed {
+                let history_ready = match birth_history.filter(|_| !meta.is_replay) {
+                    Some(SubagentSpawnHistory::Inherited { seed_history_bytes }) => {
+                        if let Some(effect) = crate::app::subagent::start_child_seed_history(
+                            agent,
+                            &child_session_id,
+                            seed_history_bytes,
+                        ) {
+                            app.pending_effects.push(effect);
+                        }
+                        true
+                    }
+                    _ if agent.session.loading_replay => false,
+                    Some(SubagentSpawnHistory::Empty) => true,
+                    Some(SubagentSpawnHistory::Durable) | None => agent
                         .subagent_views
                         .get_mut(&child_session_id)
-                        .is_some_and(|child_view| {
-                            crate::app::subagent::replay_inherited_updates(
-                                child_view,
-                                &child_session_id,
-                            )
-                            .is_some()
-                        });
-                if replayed
+                        .is_some_and(|child| {
+                            crate::app::subagent::replay_inherited_updates(child, &child_session_id)
+                                .is_some()
+                        }),
+                };
+                if history_ready
                     && let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id)
                 {
                     info.child_updates_replayed = true;

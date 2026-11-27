@@ -3512,6 +3512,9 @@ fn process_effects(
 /// Start those effects at the loop tail so they do not wait for another input
 /// or ACP event to wake the dispatcher.
 fn process_draw_effects(tasks: &mut JoinSet<TaskResult>, app: &mut AppView) -> bool {
+    if let Some(effect) = crate::app::subagent::take_open_child_seed_retry(app) {
+        app.pending_effects.push(effect);
+    }
     if app.pending_effects.is_empty() {
         return false;
     }

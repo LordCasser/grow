@@ -995,6 +995,7 @@ pub(super) fn test_subagent_spawned(
 ) -> GrowSessionUpdate {
     GrowSessionUpdate::SubagentSpawned {
         subagent_id: child_sid.into(),
+        spawn_details: None,
         parent_session_id: parent_sid.into(),
         parent_prompt_id: None,
         child_session_id: child_sid.into(),
@@ -1891,6 +1892,7 @@ mod plugins;
 mod skills_binding;
 mod subagents;
 mod subagent_reclamation;
+mod subagent_seed_history;
 mod subagent_reclamation_background;
 mod subagent_permission_routing_tests;
 mod goals;

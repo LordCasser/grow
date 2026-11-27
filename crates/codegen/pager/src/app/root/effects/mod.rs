@@ -60,10 +60,42 @@ fn control_rpc_outcome(status: Option<&str>) -> actions::ControlRpcOutcome {
     }
 }
 
+fn prompt_task_result(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    prompt_id: String,
+    response: Result<acp::PromptResponse, acp::Error>,
+    format_error: impl FnOnce(&acp::Error) -> String,
+) -> TaskResult {
+    log_prompt_result(&session_id, &response);
+    if response
+        .as_ref()
+        .is_err_and(shell::session::is_session_not_resident_error)
+    {
+        return TaskResult::PromptSessionMissing {
+            agent_id,
+            session_id,
+            prompt_id,
+        };
+    }
+    TaskResult::PromptResponse {
+        agent_id,
+        http_status: response.as_ref().err().and_then(http_status_from_error),
+        result: response.map_err(|error| format_error(&error)),
+        prompt_id: Some(prompt_id),
+    }
+}
+
 fn control_request_failure(error: acp::Error) -> actions::ControlRequestFailure {
+    let session_missing = shell::session::is_session_not_resident_error(&error);
     actions::ControlRequestFailure {
+        session_missing,
         terminal_published: shell::session::control_terminal_was_published(&error),
-        message: sanitize_user_error(&error.to_string()),
+        message: if session_missing {
+            "Session is no longer active".into()
+        } else {
+            sanitize_user_error(&error.to_string())
+        },
     }
 }
 
@@ -902,6 +934,18 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::ReadChildSeedHistory { request } => {
+            tasks.spawn(async move {
+                let read = request.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::app::subagent::read_child_seed_history(&read)
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+                TaskResult::ChildSeedHistoryLoaded { request, result }
+            });
+        }
         Effect::RestoreDescendantState {
             agent_id,
             session_id,
@@ -1208,7 +1252,7 @@ pub(crate) fn execute(
                 }
             });
         }
-        Effect::ResyncSession { agent_id, session_id, cwd, generation, permission_mode } => {
+        Effect::ResyncSession { agent_id, session_id, cwd, generation, timeout, permission_mode } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
                 let meta = serde_json::json!({
@@ -1217,39 +1261,32 @@ pub(crate) fn execute(
                 let request = acp::LoadSessionRequest::new(session_id.clone(), cwd.clone())
                     .mcp_servers(shell::util::config::load_mcp_servers(&cwd))
                     .meta(meta.as_object().cloned());
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    acp_send(request, &tx),
-                )
-                .await
-                .map_err(|_| "Session resync timed out".to_owned())
-                .and_then(|result| {
-                    result
-                        .map(|response| (
-                            parse_session_load_foreground(response.meta.as_ref()),
-                            crate::acp::meta::session_load_descendant_ownership(
-                                response.meta.as_ref(), &session_id,
-                            ),
-                            crate::app::session::AgentSession::behavior_projection_from_meta(
-                                response.meta.as_ref(),
-                            ),
-                            crate::acp::meta::session_load_scheduler_snapshot(
-                                response.meta.as_ref(),
-                            ),
-                        ))
-                        .map_err(|error| sanitize_user_error(&error.to_string()))
-                });
-                let (result, descendant_ownership, behavior, scheduler_snapshot) = match result {
-                    Ok((foreground, ownership, behavior, scheduler_snapshot)) => (
-                        Ok(foreground), ownership, behavior, scheduler_snapshot,
+                let load = acp_send(request, &tx);
+                let result = match timeout {
+                    Some(limit) => tokio::time::timeout(limit, load).await
+                        .map_err(|_| "Session resync timed out".to_owned()),
+                    None => Ok(load.await),
+                }
+                .and_then(|result| result.map_err(|error| sanitize_user_error(&error.to_string())))
+                    .map(|response| (
+                        parse_session_load_foreground(response.meta.as_ref()),
+                        crate::acp::meta::session_load_descendant_ownership(response.meta.as_ref(), &session_id),
+                        crate::app::session::AgentSession::behavior_projection_from_meta(response.meta.as_ref()),
+                        crate::acp::meta::session_load_scheduler_snapshot(response.meta.as_ref()),
+                        shell::agent::models::SessionModelState::from_config_options(response.config_options),
+                    ));
+                let (result, descendant_ownership, behavior, scheduler_snapshot, models) = match result {
+                    Ok((foreground, ownership, behavior, scheduler_snapshot, models)) => (
+                        Ok(foreground), ownership, behavior, scheduler_snapshot, models,
                     ),
-                    Err(error) => (Err(error), None, None, None),
+                    Err(error) => (Err(error), None, None, None, None),
                 };
                 TaskResult::SessionResynced {
                     agent_id,
                     session_id,
                     generation,
                     result,
+                    models,
                     descendant_ownership,
                     behavior,
                     scheduler_snapshot,
@@ -1478,18 +1515,7 @@ pub(crate) fn execute(
                     }),
                         ),
                     );
-                    log_prompt_result(&session_id, &result);
-                    let http_status = result
-                        .as_ref()
-                        .err()
-                        .and_then(http_status_from_error);
-                    TaskResult::PromptResponse {
-                        agent_id,
-                        result: result
-                            .map_err(|e| format_acp_error(&e)),
-                        http_status,
-                        prompt_id: Some(prompt_id),
-                    }
+                    prompt_task_result(agent_id, session_id, prompt_id, result, format_acp_error)
                 });
         }
         Effect::SendPromptBlocks { agent_id, session_id, blocks, images, prompt_id } => {
@@ -1537,18 +1563,7 @@ pub(crate) fn execute(
                     }),
                         ),
                     );
-                    log_prompt_result(&session_id, &result);
-                    let http_status = result
-                        .as_ref()
-                        .err()
-                        .and_then(http_status_from_error);
-                    TaskResult::PromptResponse {
-                        agent_id,
-                        result: result
-                            .map_err(|e| format_acp_error(&e)),
-                        http_status,
-                        prompt_id: Some(prompt_id),
-                    }
+                    prompt_task_result(agent_id, session_id, prompt_id, result, format_acp_error)
                 });
         }
         Effect::SendBashCommand { agent_id, session_id, command, prompt_id } => {
@@ -1598,17 +1613,7 @@ pub(crate) fn execute(
                     }),
                         ),
                     );
-                    log_prompt_result(&session_id, &result);
-                    let http_status = result
-                        .as_ref()
-                        .err()
-                        .and_then(http_status_from_error);
-                    TaskResult::PromptResponse {
-                        agent_id,
-                        result: result.map_err(|e| e.to_string()),
-                        http_status,
-                        prompt_id: Some(prompt_id),
-                    }
+                    prompt_task_result(agent_id, session_id, prompt_id, result, ToString::to_string)
                 });
         }
         Effect::CancelTurn {
@@ -4627,18 +4632,39 @@ async fn fetch_session_info(
     let resp = acp_send(request, tx)
         .await
         .map_err(|e| sanitize_user_error(&format!("couldn't fetch session info: {e}")))?;
-    let envelope: ExtMethodResult<SessionInfoResponse> = serde_json::from_str(
-            resp.0.get(),
-        )
-        .map_err(|e| {
-            tracing::debug!("typed session info deser failed: {e}");
-            "invalid session info response".to_string()
-        })?;
-    if let Some(err) = envelope.error {
-        let msg = err.as_str().map(String::from).unwrap_or_else(|| err.to_string());
-        return Err(msg);
+    parse_session_info(resp.0.get())
+}
+
+fn parse_session_info(body: &str) -> Result<SessionInfoResponse, String> {
+    let envelope: ExtMethodResult<serde_json::Value> = serde_json::from_str(body)
+        .map_err(|error| format!("Invalid session info response: {error}"))?;
+    if let Some(error) = envelope.error {
+        return Err(sanitize_user_error(
+            &error
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| error.to_string()),
+        ));
     }
-    envelope.result.ok_or_else(|| "session info response missing result".to_string())
+    let result = envelope
+        .result
+        .ok_or("Session info response missing result")?;
+    match result["status"].as_str() {
+        Some("found") => serde_json::from_value(result)
+            .map_err(|error| format!("Invalid session info response: {error}")),
+        Some(status @ ("absent" | "timed_out" | "invalid_evidence" | "unavailable")) => {
+            let source = result["source"].as_str().unwrap_or("session");
+            let detail = result["reason"]
+                .as_str()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default();
+            Err(sanitize_user_error(&format!(
+                "{source} lookup {}{detail}",
+                status.replace('_', " ")
+            )))
+        }
+        _ => Err("Invalid session info response: unknown lookup status".into()),
+    }
 }
 /// `grow/session/usage` → lifetime aggregate plus resume segments.
 async fn fetch_session_usage(

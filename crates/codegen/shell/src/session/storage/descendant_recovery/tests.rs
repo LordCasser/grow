@@ -672,6 +672,7 @@ async fn indexed_child_replay_keeps_exact_nested_ownership_and_lifecycle_ordered
 
     let child_spawn_update = GrowUpdate::SubagentSpawned {
         subagent_id: nested_spawn.subagent_id.clone(),
+        spawn_details: None,
         parent_session_id: child.id.0.to_string(),
         parent_prompt_id: None,
         child_session_id: grandchild.id.0.to_string(),
@@ -878,6 +879,7 @@ async fn only_canonical_domain_spawn_grants_compact_child_ownership() {
                 "ui-spawn-1",
                 GrowUpdate::SubagentSpawned {
                     subagent_id: "display-only-agent".into(),
+                    spawn_details: None,
                     parent_session_id: ui_only_parent.id.0.to_string(),
                     parent_prompt_id: None,
                     child_session_id: "display-only-child".into(),

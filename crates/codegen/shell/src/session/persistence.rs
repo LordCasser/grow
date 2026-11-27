@@ -1768,6 +1768,7 @@ mod title_projection_tests {
 
 #[derive(Clone)]
 pub struct PersistenceHandle {
+    pub(crate) writer_journal: crate::session::storage::jsonl::WriterJournal,
     pub tx: mpsc::UnboundedSender<PersistenceMsg>,
     noop: bool,
     task: Option<tokio::task::AbortHandle>,
@@ -1779,6 +1780,7 @@ fn actor_channel(
 ) -> (PersistenceHandle, mpsc::UnboundedReceiver<PersistenceMsg>) {
     let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     let handle = PersistenceHandle {
+        writer_journal: Default::default(),
         tx,
         noop: false,
         task: None,
@@ -1841,6 +1843,7 @@ impl PersistenceHandle {
     #[cfg(test)]
     pub(crate) fn from_sender_for_test(tx: mpsc::UnboundedSender<PersistenceMsg>) -> Self {
         Self {
+            writer_journal: Default::default(),
             tx,
             noop: false,
             task: None,
@@ -1851,6 +1854,7 @@ impl PersistenceHandle {
     pub fn noop() -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
         Self {
+            writer_journal: Default::default(),
             tx,
             noop: true,
             task: None,
@@ -2949,6 +2953,7 @@ pub(crate) async fn new(
 
     let session_directory = storage.open_session(info)?.directory_handle();
     let (mut handle, rx) = actor_channel(Some(session_directory));
+    handle.writer_journal = storage.writer_journal(info)?;
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
@@ -2985,11 +2990,12 @@ pub(crate) async fn new_child(
     PersistenceHandle,
     chat_state::Timeline,
     Arc<crate::session::storage::ContainedDirectory>,
+    Option<u64>,
 )> {
     let storage = JsonlStorageAdapter::new();
     let mut initial_summary = Summary::new(info, model_id.clone())?;
     lineage.apply_to(&mut initial_summary);
-    let (mut summary, timeline_events) = storage
+    let (mut summary, timeline, seed_history_bytes) = storage
         .init_session_with_summary(
             info,
             initial_summary,
@@ -3001,8 +3007,6 @@ pub(crate) async fn new_child(
             )],
         )
         .await?;
-    let timeline = chat_state::Timeline::from_events(timeline_events)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     touch_worktree_for_session(info).await;
 
     if summary.current_model_id != model_id {
@@ -3014,6 +3018,7 @@ pub(crate) async fn new_child(
     let session_directory = storage.open_session(info)?.directory_handle();
 
     let (mut handle, rx) = actor_channel(Some(session_directory.clone()));
+    handle.writer_journal = storage.writer_journal(info)?;
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
@@ -3032,7 +3037,7 @@ pub(crate) async fn new_child(
     });
     handle.task = Some(task.abort_handle());
 
-    Ok((handle, timeline, session_directory))
+    Ok((handle, timeline, session_directory, seed_history_bytes))
 }
 
 /// Canonical resume payload. Client updates and rewind snapshots remain lazy.
@@ -3117,6 +3122,7 @@ pub(crate) async fn load_light_for_replay(
     }
 
     let (mut handle, rx) = actor_channel(Some(session_directory));
+    handle.writer_journal = storage.writer_journal(&loaded_info)?;
 
     let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
 

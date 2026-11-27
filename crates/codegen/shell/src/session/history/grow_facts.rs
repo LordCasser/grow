@@ -350,6 +350,7 @@ impl TryFrom<SessionUpdate> for GrowHistoryFact {
             SessionUpdate::TaskCompleted { task_snapshot } => Self::TaskCompleted { task_snapshot },
             SessionUpdate::SubagentSpawned {
                 subagent_id,
+                spawn_details: _,
                 parent_session_id,
                 parent_prompt_id,
                 child_session_id,
@@ -713,6 +714,7 @@ impl From<GrowHistoryFact> for SessionUpdate {
                 goal_id,
             } => Self::SubagentSpawned {
                 subagent_id,
+                spawn_details: None,
                 parent_session_id,
                 parent_prompt_id,
                 child_session_id,

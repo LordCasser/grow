@@ -1181,6 +1181,143 @@
         assert!(matches!(sb.kind, SubagentBlockKind::Started));
     }
 
+    fn spawn_with_details(parent: &str, child: &str, replay_child_history: bool) -> GrowSessionUpdate {
+        let mut update = test_subagent_spawned(parent, child);
+        let GrowSessionUpdate::SubagentSpawned { spawn_details, .. } = &mut update else {
+            unreachable!()
+        };
+        *spawn_details = Some(shell::extensions::notification::SubagentSpawnDetails {
+            prompt: "inspect the workspace".into(),
+            child_cwd: "/tmp/child-worktree".into(),
+            worktree_path: Some("/tmp/child-worktree".into()),
+            history: if replay_child_history {
+                shell::extensions::notification::SubagentSpawnHistory::Durable
+            } else {
+                shell::extensions::notification::SubagentSpawnHistory::Empty
+            },
+        });
+        update
+    }
+
+    #[test]
+    fn fresh_subagent_uses_published_details_and_displays_first_live_prompt_once() {
+        with_replay_disk_home(|home| {
+            let parent = "fresh-parent";
+            let child = "fresh-child";
+            let task = "inspect the workspace";
+            // Distinct disk contents make a mistaken read visible in the reducer's output.
+            write_subagent_spawn_timeline(home, parent, child, "disk-only prompt");
+            write_child_history_fixture(home, child, &child_tool_line(child));
+            let mut app = make_app_with_agent(parent);
+            handle(
+                make_ext_session_notification(parent, spawn_with_details(parent, child, false)),
+                &mut app,
+            );
+
+            let root = app.agents.get_mut(&AgentId(0)).unwrap();
+            let info = &root.session.subagent_sessions[child];
+            assert_eq!(info.prompt.as_deref(), Some(task));
+            assert_eq!(info.worktree_path.as_deref(), Some("/tmp/child-worktree"));
+            assert_eq!(
+                root.subagent_views[child].session.cwd,
+                std::path::Path::new("/tmp/child-worktree")
+            );
+            assert!(root.subagent_views[child].session.is_worktree);
+            assert!(info.child_updates_replayed);
+            root.open_subagent_fullscreen(child.into());
+            assert_eq!(child_scrollback_tool_call_count(root, child), 0);
+
+            let line: serde_json::Value =
+                serde_json::from_str(&child_user_message_line(child, task)).unwrap();
+            let (response_tx, _) = tokio::sync::oneshot::channel();
+            handle(
+                AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                    request: serde_json::from_value(line["params"].clone()).unwrap(),
+                    response_tx,
+                }),
+                &mut app,
+            );
+            handle(make_agent_chunk_message(child, "fresh output"), &mut app);
+            let root = &app.agents[&AgentId(0)];
+            assert_eq!(child_scrollback_matching_prompt_count(root, child, task), 1);
+            assert!(matches!(
+                &root.subagent_views[child]
+                    .scrollback
+                    .entry(0)
+                    .unwrap()
+                    .block,
+                RenderBlock::UserPrompt(_)
+            ));
+            assert!(root.subagent_views[child].scrollback.iter_entries().any(|(_, entry)| {
+                matches!(&entry.block, RenderBlock::AgentMessage(message) if message.text() == "fresh output")
+            }));
+            assert_eq!(child_scrollback_tool_call_count(root, child), 0);
+        });
+    }
+
+    #[test]
+    fn inherited_and_replayed_subagent_birth_preserve_child_history() {
+        for (loading_parent, replay_notification) in [(false, false), (true, true), (true, false)] {
+            with_replay_disk_home(|home| {
+                let parent = "history-parent";
+                let child = "history-child";
+                write_child_history_fixture(home, child, &child_tool_line(child));
+                let mut app = make_app_with_agent(parent);
+                app.agents
+                    .get_mut(&AgentId(0))
+                    .unwrap()
+                    .session
+                    .loading_replay = loading_parent;
+                // A reconstructed birth may arrive outside a parent replay pass.
+                // Replaying a fresh birth later needs the history written since its launch.
+                let update = spawn_with_details(parent, child, !loading_parent);
+                if replay_notification {
+                    let replay = subagent_ext_replay(
+                        parent,
+                        serde_json::to_value(update).unwrap(),
+                        "history-parent-1",
+                    );
+                    handle_ext_notification(&replay, &mut app);
+                } else {
+                    handle(make_ext_session_notification(parent, update), &mut app);
+                }
+                let root = app.agents.get_mut(&AgentId(0)).unwrap();
+                assert_eq!(
+                    child_scrollback_tool_call_count(root, child),
+                    usize::from(!loading_parent)
+                );
+                root.session.loading_replay = false;
+                root.open_subagent_fullscreen(child.into());
+                assert_eq!(child_scrollback_tool_call_count(root, child), 1);
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "read-only timing against the saved session named by GROW_SPAWN_BENCH_PARENT"]
+    fn measure_live_subagent_spawn_reducer() {
+        let parent = std::env::var("GROW_SPAWN_BENCH_PARENT").expect("set GROW_SPAWN_BENCH_PARENT");
+        let home = shell::util::grow_home::grow_home();
+        let start = std::time::Instant::now();
+        let timeline = shell::session::storage::load_timeline_by_id_at(&parent, &home)
+            .unwrap()
+            .expect("saved parent session");
+        let count = timeline.events().len();
+        drop(timeline);
+        let old_parent_read = start.elapsed();
+
+        let child = "measure-new-child";
+        let mut app = make_app_with_agent(&parent);
+        let spawn = make_ext_session_notification(&parent, spawn_with_details(&parent, child, false));
+        let start = std::time::Instant::now();
+        handle(spawn, &mut app);
+        let live_reducer = start.elapsed();
+        assert!(app.agents[&AgentId(0)].session.subagent_sessions[child].child_updates_replayed);
+        eprintln!(
+            "domain_events={count} old_parent_read={old_parent_read:?} live_reducer={live_reducer:?}"
+        );
+    }
+
     /// Regression: replayed SubagentSpawned (resumed_from unset) must load the
     /// child's unified Timeline history so fullscreen scrollback is not prompt-only.
     #[test]

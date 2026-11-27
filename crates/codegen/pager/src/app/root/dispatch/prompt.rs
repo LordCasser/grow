@@ -1697,9 +1697,19 @@ pub(super) fn handle_prompt_response(
     app: &mut AppView,
     agent_id: AgentId,
     result: Result<acp::PromptResponse, String>,
-    _http_status: Option<u16>,
+    missing_session: Option<acp::SessionId>,
     prompt_id: Option<String>,
 ) -> Vec<Effect> {
+    if let Some(sid) = &missing_session
+        && !app.agents.get(&agent_id).is_some_and(|agent| {
+            agent.session.session_id.as_ref() == Some(sid)
+                && agent.session.current_prompt_id == prompt_id
+                && agent.session_reload.is_none()
+                && !agent.session.loading_replay
+        })
+    {
+        return vec![];
+    }
     if let Ok(response) = &result
         && let Some(effects) =
             consume_advisory_admission_replay(app, agent_id, response, prompt_id.as_deref())
@@ -1875,6 +1885,15 @@ pub(super) fn handle_prompt_response(
         crate::app::agent_view::turn_completion::TerminalApply::ViewerFinalized
     ) {
         return vec![];
+    }
+
+    if missing_session.is_some() {
+        if let Some(draft) = failed_draft {
+            restore_failed_input_draft(agent, draft);
+        }
+        return crate::app::acp_handler::session_resync_effect(app, agent_id, None)
+            .into_iter()
+            .collect();
     }
 
     if let Some(draft) = failed_draft {

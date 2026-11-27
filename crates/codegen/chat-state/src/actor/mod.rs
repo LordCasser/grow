@@ -91,29 +91,35 @@ impl ChatStateActor {
         Ok(committed)
     }
 
-    /// Persist a fire-and-forget command with actor-level backpressure. The
-    /// same immutable event is retried until it commits or the actor is
-    /// cancelled, so a transient ENOSPC/lock/I/O failure cannot create a
-    /// missing sequence and poison every later append.
+    /// A first write with a live acknowledgement waits for the persistence
+    /// worker unless the caller set a deadline. Once an attempt reports an
+    /// error or loses its acknowledgement, the exact event has one retry budget.
     async fn persist_pending_timeline_event(
         &mut self,
         event: &TimelineEvent,
         caller_deadline: Option<tokio::time::Instant>,
     ) -> Result<(), crate::commands::TimelineWriteError> {
         let mut retry_delay = std::time::Duration::from_millis(25);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-        let deadline = caller_deadline.map_or(hard_deadline, |caller| caller.min(hard_deadline));
-        *self
-            .pending_commit
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(crate::PendingTimelineCommit {
-            event: event.clone(),
-            error_kind: None,
-            error_message: None,
-            acknowledgement_lost: false,
-        });
+        let mut retry_deadline = None;
+        {
+            let pending = crate::PendingTimelineCommit {
+                event: event.clone(),
+                error_kind: None,
+                error_message: None,
+                acknowledgement_lost: false,
+            };
+            let mut slot = self
+                .pending_commit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if caller_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                // The command expired in the mailbox. No append owns this sequence.
+                return Err(crate::commands::TimelineWriteError::DeadlineExceeded);
+            }
+            *slot = Some(pending);
+        }
         loop {
-            if tokio::time::Instant::now() >= deadline {
+            if retry_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 self.persistence_poisoned = true;
                 return Err(crate::commands::TimelineWriteError::DeadlineExceeded);
             }
@@ -127,7 +133,12 @@ impl ChatStateActor {
                     }
                     return Err(crate::commands::TimelineWriteError::Cancelled);
                 }
-                _ = tokio::time::sleep_until(deadline) => {
+                _ = async {
+                    match retry_deadline.or(caller_deadline) {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     self.persistence_poisoned = true;
                     if let Some(pending) = self
                         .pending_commit
@@ -199,6 +210,10 @@ impl ChatStateActor {
                     );
                 }
             }
+            let deadline = *retry_deadline.get_or_insert_with(|| {
+                let limit = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                caller_deadline.map_or(limit, |caller| caller.min(limit))
+            });
             tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => {
@@ -1281,7 +1296,7 @@ impl ChatStateActor {
                 let _ = reply.send(snapshot);
             }
             ChatStateCommand::GetSubagentOperation { subagent_id, reply } => {
-                let _ = reply.send(self.state.timeline.subagent_operation(&subagent_id));
+                let _ = reply.send(self.state.timeline.subagent_operation_at_cut(&subagent_id));
             }
             ChatStateCommand::GetSubagentHistory { reply } => {
                 let (mut events, history) = self.state.timeline.subagent_history_sources();

@@ -2,6 +2,10 @@
 
 这里只保留已有明确暂缓决定或启动门槛的事项。2026-11-06用户重新授权“完成修复和处理，处理backlog的非延期项目”；本轮按[实施范围与验收](changes/archive/2026-11-07-complete-nondeferred-backlog/proposal.md)推进，下文2026-11-05停止点仅作历史。刚分析的child收尾及SessionEnd顺序在本轮范围，其他明确暂缓事项继续保留。八项非延期验证债务已完成修复、验证并随 [v2.6.0](https://github.com/LordCasser/grow/releases/tag/v2.6.0) 发布；逐项 owner、证据和剩余边界见[发布阻塞闭合矩阵](changes/archive/2026-11-04-close-v2-6-0-release-blockers/verification.md#八项闭合矩阵)，原始八项快照见[backlog-before.md](changes/archive/2026-11-04-close-v2-6-0-release-blockers/backlog-before.md)。既有历史整理记录见[本轮闭合记录](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/algorithm-inventory.md)及其[清理前快照](changes/archive/2026-11-03-close-nondeferred-backlog-and-build-release/backlog-before.md)。
 
+## 2026-11-27 同父子会话并发恢复（已处理）
+
+旧版四路恢复会将同一份 32 MiB 父日志读四遍。按委派倒查并校验原日志后，父日志读取量和来源子会话的恢复成本见[新旧实测](changes/archive/2026-11-27-optimize-indexed-subagent-resume/measurements.md)。
+
 ## 2026-11-25 上下文管理架构审计（已关闭）
 
 Skill 请求估值、摘要选区进展与失败准入、会话身份、Skill 窄屏及历史分片均有运行时回归。冷恢复已分别验证 Grow 发出的首包和 AGY 0.1.120 实际保留的证据。该网关在超出首包字节预算时仍可能舍弃开场消息之后的旧摘要。详见[原始审计](changes/archive/2026-11-25-audit-context-management-boundaries/audit.md)和[修复验收](changes/archive/2026-11-25-close-context-management-audit/verification.md)。

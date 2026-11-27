@@ -45,6 +45,7 @@ fn spawned_notification() -> GrowSessionNotification {
         session_id: acp::SessionId::new("test-actor"),
         update: GrowSessionUpdate::SubagentSpawned {
             subagent_id: "child-1".into(),
+            spawn_details: None,
             parent_session_id: "test-actor".into(),
             parent_prompt_id: None,
             child_session_id: "child-1".into(),

@@ -47,6 +47,43 @@ pub struct WorkflowAgentInfo {
     pub duration_ms: u64,
 }
 
+/// Display fields from the committed Spawn, carried to the live client.
+/// Historical projections obtain them from the canonical ownership facts.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SubagentSpawnDetails {
+    pub prompt: String,
+    pub child_cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    pub history: SubagentSpawnHistory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SubagentSpawnHistory {
+    Empty,
+    /// The prefix originally published with this child's seed.
+    Inherited {
+        seed_history_bytes: u64,
+    },
+    /// The projection describes a previously started child.
+    Durable,
+}
+
+impl SubagentSpawnDetails {
+    pub(crate) fn from_spawn(
+        spawn: &chat_state::SubagentSpawnEvent,
+        history: SubagentSpawnHistory,
+    ) -> Self {
+        Self {
+            prompt: spawn.prompt.clone(),
+            child_cwd: spawn.child_cwd.clone(),
+            worktree_path: spawn.worktree_path.clone(),
+            history,
+        }
+    }
+}
+
 /// Grow-specific session notification (parallel to acp::SessionNotification)
 /// This wraps an GrowSessionUpdate with session context for persistence and replay.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -988,6 +1025,8 @@ pub enum SessionUpdate {
     SubagentSpawned {
         /// Unique subagent identifier (same as child session ID).
         subagent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_details: Option<SubagentSpawnDetails>,
         /// The parent session that spawned this subagent.
         parent_session_id: String,
         /// The parent prompt/turn that spawned this subagent.
@@ -1575,6 +1614,7 @@ mod tests {
         // notification ordering expectations).
         let spawned = serde_json::to_value(SessionUpdate::SubagentSpawned {
             subagent_id: "s".into(),
+            spawn_details: None,
             parent_session_id: "p".into(),
             parent_prompt_id: None,
             child_session_id: "c".into(),
@@ -1630,6 +1670,7 @@ mod tests {
     fn subagent_spawned_effort_is_optional_and_round_trips() {
         let mut value = serde_json::to_value(SessionUpdate::SubagentSpawned {
             subagent_id: "s".into(),
+            spawn_details: None,
             parent_session_id: "p".into(),
             parent_prompt_id: None,
             child_session_id: "c".into(),

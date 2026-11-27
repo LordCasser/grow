@@ -14,7 +14,7 @@ async fn init(
     info: &crate::session::info::Info,
     parent: Option<&str>,
     facts: Vec<chat_state::TimelineEventKind>,
-) -> Vec<chat_state::TimelineEvent> {
+) -> chat_state::Timeline {
     let mut summary = crate::session::persistence::Summary::new(
         info,
         crate::session::persistence::default_model_id(),
@@ -107,7 +107,7 @@ async fn durable_history_observation_uses_authorized_parent_facts_read_only() {
     open_spawn.security_parent_session_id = root_info.id.0.to_string();
     let mut workflow_spawn = recovery_spawn("workflow", "history-workflow");
     workflow_spawn.workflow_run_id = Some("run-1".into());
-    let root_events = init(
+    let mut parent = init(
         &storage,
         &root_info,
         None,
@@ -140,7 +140,8 @@ async fn durable_history_observation_uses_authorized_parent_facts_read_only() {
     )
     .await;
     let seq_for = |id: &str| {
-        root_events
+        parent
+            .events()
             .iter()
             .find(|event| {
                 matches!(
@@ -167,7 +168,7 @@ async fn durable_history_observation_uses_authorized_parent_facts_read_only() {
     )
     .await;
     let child_info = info("history-cancelled");
-    let child_events = init(
+    let child = init(
         &storage,
         &child_info,
         Some(root_info.id.0.as_ref()),
@@ -181,8 +182,7 @@ async fn durable_history_observation_uses_authorized_parent_facts_read_only() {
         ],
     )
     .await;
-    let result_seq = child_events.last().unwrap().seq.get();
-    let mut parent = chat_state::Timeline::from_events(root_events.clone()).unwrap();
+    let result_seq = child.last_seq().unwrap().get();
     let ended = parent
         .record(terminal(
             &cancelled_spawn,
@@ -299,7 +299,7 @@ async fn durable_history_observation_validates_result_links_and_output() {
         let root = info("result-root");
         let mut spawn = recovery_spawn("cancelled", "result-child");
         spawn.security_parent_session_id = root.id.0.to_string();
-        let root_events = init(
+        let mut root_timeline = init(
             &storage,
             &root,
             None,
@@ -308,9 +308,9 @@ async fn durable_history_observation_validates_result_links_and_output() {
             )],
         )
         .await;
-        let spawn_seq = root_events.last().unwrap().seq.get();
+        let spawn_seq = root_timeline.last_seq().unwrap().get();
         let child = info("result-child");
-        let child_events = init(
+        let mut child_timeline = init(
             &storage,
             &child,
             Some(root.id.0.as_ref()),
@@ -324,7 +324,6 @@ async fn durable_history_observation_validates_result_links_and_output() {
         } else {
             chat_state::SubagentOutcome::Completed
         };
-        let mut child_timeline = chat_state::Timeline::from_events(child_events).unwrap();
         let mut result_kind = result(outcome);
         if let chat_state::TimelineEventKind::SubagentResult(result) = &mut result_kind {
             result.output_ref = Some(artifact.timeline_ref.clone());
@@ -334,7 +333,6 @@ async fn durable_history_observation_validates_result_links_and_output() {
             .append_timeline_event_durable(&child, &result)
             .await
             .unwrap();
-        let mut root_timeline = chat_state::Timeline::from_events(root_events).unwrap();
         let result_seq = if case == "invalid-link" {
             result.seq.get() - 1
         } else {

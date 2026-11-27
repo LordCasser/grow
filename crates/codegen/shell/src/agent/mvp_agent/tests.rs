@@ -699,6 +699,7 @@ pub(super) fn make_test_handle_with_receiver(
         hunk_cancel,
     );
     let handle = crate::session::SessionHandle {
+        writer_journal: Default::default(),
         lifecycle_owner: std::sync::Arc::new(crate::session::handle::SessionLifecycleOwner::new(
             &cmd_tx,
         )),

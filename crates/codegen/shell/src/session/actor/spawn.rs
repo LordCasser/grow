@@ -3614,6 +3614,7 @@ pub(crate) async fn spawn_session_actor(
     });
     Ok((
         SessionHandle {
+            writer_journal: persistence.writer_journal.clone(),
             lifecycle_owner: std::sync::Arc::new(
                 crate::session::handle::SessionLifecycleOwner::new(&cmd_tx),
             ),

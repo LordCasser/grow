@@ -86,6 +86,9 @@ pub(crate) enum AppendDurability {
     Durable,
 }
 type TimelinePrefix = std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>;
+/// A passive reference to the lifecycle owner's verified journal cut.
+#[derive(Clone, Default)]
+pub(crate) struct WriterJournal(std::sync::Weak<std::sync::Mutex<Option<LedgerPrefix>>>);
 type TimelinePrefixCache =
     std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, TimelinePrefix>>>;
 type WriterLeases = std::sync::Mutex<std::collections::BTreeMap<String, SessionWriterLease>>;
@@ -394,6 +397,143 @@ impl OpenedSession {
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
         };
         self.validate_timeline_evidence(timeline_id, timeline, history)
+    }
+
+    /// Resolve a delegation at one committed cut of its owning parent.
+    pub(crate) fn resume_subagent_operation(
+        &self,
+        id: &str,
+        owner: Option<&(WriterJournal, chat_state::timeline::SubagentOperationAtCut)>,
+    ) -> io::Result<Option<chat_state::timeline::SubagentOperation>> {
+        #[cfg(not(unix))]
+        let _ = owner;
+        let query = |timeline: &Timeline| {
+            timeline
+                .subagent_operation(id)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        };
+        #[cfg(unix)]
+        let lock = self.resume_append_read_lock()?;
+        let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+        let path = self.directory.display_path().join(name);
+        let mut file = self
+            .directory
+            .open_regular(name, "mandatory Timeline ledger")?;
+        let len = file.metadata()?.len();
+        let complete = JsonlStorageAdapter::timeline_complete_len(&mut file, len)?;
+        #[cfg(unix)]
+        if lock.is_some()
+            && let Some((writer, operation)) = owner
+            && operation.operation.1.subagent_id == id
+            && working_snapshot::confirm_writer_operation(writer, &mut file, complete, operation)?
+        {
+            return Ok(Some(operation.operation.clone()));
+        }
+        #[cfg(unix)]
+        if lock.is_some()
+            && let Some(timeline) =
+                working_snapshot::parent_lifecycle_for_read(self, &mut file, complete, &path)?
+        {
+            return query(&timeline);
+        }
+        query(
+            &self
+                .validated_journal_cut(&mut file, complete, &path)?
+                .timeline,
+        )
+    }
+
+    #[cfg(unix)]
+    fn resume_append_read_lock(&self) -> io::Result<Option<std::fs::File>> {
+        match self.directory.open_regular(
+            std::ffi::OsStr::new("timeline.jsonl.lock"),
+            "Timeline append lock",
+        ) {
+            Ok(file) => {
+                fs2::FileExt::lock_shared(&file)?;
+                Ok(Some(file))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn validated_journal_cut(
+        &self,
+        file: &mut std::fs::File,
+        complete: u64,
+        path: &Path,
+    ) -> io::Result<ValidatedTimeline> {
+        let (journal, _) =
+            JsonlStorageAdapter::read_journal_prefix_data(file, complete, path, None, None)?;
+        let timeline = Timeline::from_events(journal.events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.validate_timeline_evidence(self.summary.info.id.0.as_ref(), timeline, journal.history)
+    }
+
+    /// Hold one committed cut through Surface, display and result-link materialization.
+    /// A missing publication falls back to the same canonical byte frontier.
+    pub(crate) fn with_resume_timeline<T>(
+        &self,
+        use_cut: impl FnOnce(ValidatedTimeline) -> T,
+    ) -> io::Result<T> {
+        #[cfg(unix)]
+        let append_lock = self.resume_append_read_lock()?;
+        let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+        let path = self.directory.display_path().join(name);
+        let mut file = self
+            .directory
+            .open_regular(name, "mandatory Timeline ledger")?;
+        let len = file.metadata()?.len();
+        let complete = JsonlStorageAdapter::timeline_complete_len(&mut file, len)?;
+        #[cfg(unix)]
+        if append_lock.is_some()
+            && let Some(validated) =
+                working_snapshot::load_read_only(self, &mut file, complete, &path)?
+        {
+            return Ok(use_cut(validated));
+        }
+        Ok(use_cut(
+            self.validated_journal_cut(&mut file, complete, &path)?,
+        ))
+    }
+
+    /// Read the exact prefix published by child initialization. Unlike a
+    /// live snapshot, this boundary must end on a complete journal record.
+    pub(super) fn validated_child_seed(
+        &self,
+        seed_history_bytes: u64,
+    ) -> io::Result<ValidatedTimeline> {
+        let name = std::ffi::OsStr::new(super::TIMELINE_FILE);
+        let mut file = self.directory.open_regular(name, "child seed journal")?;
+        let (journal, _) = JsonlStorageAdapter::read_journal_prefix_data(
+            &mut file,
+            seed_history_bytes,
+            &self.directory.display_path().join(name),
+            None,
+            None,
+        )?;
+        let session_id = self.summary.info.id.0.as_ref();
+        let valid_seed = journal.events.split_last().is_some_and(|(last, prefix)| {
+            matches!(&last.kind, chat_state::TimelineEventKind::SubagentSeed(seed)
+                if seed.subagent_id == session_id
+                    && self.summary.parent_session_id.as_deref() == Some(&seed.parent_timeline_id)
+                    && seed.context_source == chat_state::SubagentContextSource::Resumed)
+                && prefix.iter().all(|event| {
+                    event.messages().is_some_and(|messages| {
+                        matches!(messages.cause, chat_state::MessageCause::Seed)
+                    })
+                })
+        });
+        if !valid_seed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "expected the resumed child's seed prefix",
+            ));
+        }
+        let timeline = Timeline::from_events(journal.events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.validate_timeline_evidence(session_id, timeline, journal.history)
     }
 
     pub(crate) fn validated_child_result(
@@ -1419,6 +1559,12 @@ impl JsonlStorageAdapter {
             )?
             .metadata()
             .map(|metadata| metadata.len())
+    }
+
+    pub(crate) fn writer_journal(&self, info: &Info) -> io::Result<WriterJournal> {
+        Ok(WriterJournal(std::sync::Arc::downgrade(
+            &self.timeline_prefix_state(info)?,
+        )))
     }
 
     fn timeline_prefix_state(
@@ -5272,44 +5418,53 @@ impl JsonlStorageAdapter {
         initial_prompt_blobs: crate::session::persistence::ImmutablePromptBlobs,
         initial_presentation: crate::session::history::SeedPresentation,
         initial_facts: Vec<chat_state::TimelineEventKind>,
-    ) -> io::Result<(Summary, Vec<chat_state::TimelineEvent>)> {
-        let parent = self.ensure_session_parent(info)?;
-        // Claim the canonical identity before publishing it. This also makes
-        // initialization contend with a committed reclaim intent rather than
-        // recreating a directory that recovery has not finished removing.
-        self.ensure_writer_lease(info)?;
-        let result = self.build_publish_and_cache(info, &parent, |staging| {
-            crate::session::persistence::write_initial_prompt_blobs_to_directory(
-                &initial_surface,
-                staging,
-                &initial_prompt_blobs,
-            )?;
-            let mut timeline = Timeline::from_seed(initial_surface)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            for fact in initial_facts {
-                timeline
-                    .record(fact)
+    ) -> io::Result<(Summary, Timeline, Option<u64>)> {
+        let storage = self.clone();
+        let info = info.clone();
+        tokio::task::spawn_blocking(move || {
+            let parent = storage.ensure_session_parent(&info)?;
+            // Claim the canonical identity before publishing it. This also makes
+            // initialization contend with a committed reclaim intent rather than
+            // recreating a directory that recovery has not finished removing.
+            storage.ensure_writer_lease(&info)?;
+            storage.build_publish_and_cache(&info, &parent, |staging| {
+                crate::session::persistence::write_initial_prompt_blobs_to_directory(
+                    &initial_surface,
+                    staging,
+                    &initial_prompt_blobs,
+                )?;
+                let mut timeline = Timeline::from_seed(initial_surface)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            }
-            let facts = initial_presentation.into_facts(&timeline)?;
-            let journal = Self::encode_journal(timeline.events(), &facts)?;
-            staging.write_atomic(
-                std::ffi::OsStr::new(super::TIMELINE_FILE),
-                &journal,
-                true,
-                false,
-            )?;
-            #[cfg(unix)]
-            Self::publish_initial_history_index(staging, info.id.0.as_ref(), journal.len() as u64)?;
-            staging.write_atomic(
-                std::ffi::OsStr::new(super::SUMMARY_FILE),
-                &super::serialize_summary(&summary)?,
-                true,
-                false,
-            )?;
-            Ok((summary, timeline.events().to_vec()))
-        })?;
-        Ok(result)
+                for fact in initial_facts {
+                    timeline
+                        .record(fact)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                }
+                let facts = initial_presentation.into_facts(&timeline)?;
+                let journal = Self::encode_journal(timeline.events(), &facts)?;
+                staging.write_atomic(
+                    std::ffi::OsStr::new(super::TIMELINE_FILE),
+                    &journal,
+                    true,
+                    false,
+                )?;
+                let journal_bytes = journal.len() as u64;
+                drop(journal);
+                let seed_history_bytes = (!facts.is_empty()).then_some(journal_bytes);
+                drop(facts);
+                #[cfg(unix)]
+                Self::publish_initial_history_index(staging, info.id.0.as_ref(), journal_bytes)?;
+                staging.write_atomic(
+                    std::ffi::OsStr::new(super::SUMMARY_FILE),
+                    &super::serialize_summary(&summary)?,
+                    true,
+                    false,
+                )?;
+                Ok((summary, timeline, seed_history_bytes))
+            })
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     /// Like [`Self::apply_summary_patch`], but returns whether a
     /// a newer canonical title projection was applied (see [`Summary::apply_patch`]).
@@ -5779,7 +5934,7 @@ impl StorageAdapter for JsonlStorageAdapter {
                 tracing::info!("Creating new session in JSONL");
                 let mut summary = Summary::new(info, model_id)?;
                 summary.sandbox_profile = sandbox::configured_profile_name().map(String::from);
-                let (summary, _) = self
+                let (summary, _, _) = self
                     .init_session_with_summary(
                         info,
                         summary,

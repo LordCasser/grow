@@ -1601,3 +1601,29 @@ async fn session_delete_effect_requires_ack_and_preserves_runtime_failure_receip
         }
     }
 }
+
+#[test]
+fn missing_session_is_a_specific_acp_lookup_rejection() {
+    assert!(control_request_failure(shell::session::session_not_resident_error()).session_missing);
+    for error in [
+        acp::Error::invalid_params().data("unknown session id"),
+        acp::Error::internal_error().data("unknown session id"),
+    ] {
+        assert!(!control_request_failure(error).session_missing);
+    }
+}
+
+#[test]
+fn missing_session_info_shows_the_durable_lookup_reason() {
+    let mut info = serde_json::to_value(make_session_info("auto", None, 1, 4096)).unwrap();
+    info["status"] = "found".into();
+    info["source"] = "durable".into();
+    let read = |result| parse_session_info(&serde_json::json!({ "result": result }).to_string());
+    assert_eq!(read(info).unwrap().data.model.as_deref(), Some("auto"));
+    let error = read(serde_json::json!({
+        "source": "durable", "status": "unavailable", "reason": "Timeline exceeds read budget"
+    }))
+    .unwrap_err();
+    assert!(error.contains("durable") && error.contains("Timeline exceeds read budget"));
+    assert!(read(serde_json::json!({"status": "found"})).is_err());
+}

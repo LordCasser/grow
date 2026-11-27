@@ -4148,7 +4148,7 @@ pub fn load_updates_for_replay_at(
 fn with_prepared_history<R>(
     session_id: &str,
     grow_home: &std::path::Path,
-    f: impl FnOnce(&[SessionUpdate]) -> io::Result<R>,
+    f: impl FnOnce(Vec<SessionUpdate>) -> io::Result<R>,
 ) -> io::Result<Option<R>> {
     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
     let Some(opened) = storage.open_session_by_id_shared_read(session_id)? else {
@@ -4159,7 +4159,7 @@ fn with_prepared_history<R>(
     let prepared = validated
         .history
         .into_prepare(&identity, &validated.timeline, None)?;
-    Ok(Some(f(&prepared.updates)?))
+    Ok(Some(f(prepared.updates)?))
 }
 
 fn load_prepared_updates_for_replay(
@@ -4168,10 +4168,10 @@ fn load_prepared_updates_for_replay(
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
     with_prepared_history(session_id, grow_home, |updates| {
         Ok(updates
-            .iter()
+            .into_iter()
             .filter_map(|update| match update {
                 SessionUpdate::Acp(notification) => {
-                    Some(strip_context_wrappers(notification.update.clone()))
+                    Some(strip_context_wrappers(notification.update))
                 }
                 _ => None,
             })
@@ -4242,7 +4242,7 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
         let mut emitted = false;
         for update in updates {
             if let SessionUpdate::Acp(notification) = update {
-                f(strip_context_wrappers(notification.update.clone()));
+                f(strip_context_wrappers(notification.update));
                 emitted = true;
             }
         }
@@ -4264,44 +4264,66 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
 pub fn stream_session_history_at(
     session_id: &str,
     grow_home: &Path,
-    mut emit: impl FnMut(SessionUpdate),
+    emit: impl FnMut(SessionUpdate),
 ) -> io::Result<ReplayEmission> {
-    let Some(emitted) = with_prepared_history(session_id, grow_home, |updates| {
-        let mut emitted = false;
-        for update in updates {
-            match update {
-                SessionUpdate::Acp(n) => {
-                    let mut n = (**n).clone();
-                    n.update = strip_context_wrappers(n.update);
-                    emit(SessionUpdate::Acp(Box::new(n)));
-                    emitted = true;
-                }
-                SessionUpdate::Grow(n)
-                    if matches!(
-                        &n.update,
-                        crate::extensions::notification::SessionUpdate::UiNotice(_)
-                            | crate::extensions::notification::SessionUpdate::ImageRecoveryOperation { .. }
-                            | crate::extensions::notification::SessionUpdate::TurnCompleted { .. }
-                            | crate::extensions::notification::SessionUpdate::TaskBackgrounded { .. }
-                            | crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
-                    ) =>
-                {
-                    emit(SessionUpdate::Grow(n.clone()));
-                    emitted = true;
-                }
-                _ => {}
+    with_prepared_history(session_id, grow_home, |updates| {
+        Ok(emit_child_history(updates, emit))
+    })
+    .map(|outcome| outcome.unwrap_or(ReplayEmission::Empty))
+}
+
+/// Project only a newly resumed child's inherited display, even if the actor
+/// has since appended turns. Validate the entire seed before emitting rows.
+pub fn stream_child_seed_history_at(
+    session_id: &str,
+    grow_home: &Path,
+    seed_history_bytes: u64,
+    emit: impl FnMut(SessionUpdate),
+) -> io::Result<ReplayEmission> {
+    let storage = JsonlStorageAdapter::with_root(grow_home.to_owned());
+    let opened = storage
+        .open_session_by_id_shared_read(session_id)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "child session is missing"))?;
+    let seed = opened.validated_child_seed(seed_history_bytes)?;
+    let prepared = seed
+        .history
+        .into_prepare(&opened.summary().info.id, &seed.timeline, None)?;
+    Ok(emit_child_history(prepared.updates, emit))
+}
+
+fn emit_child_history(
+    updates: Vec<SessionUpdate>,
+    mut emit: impl FnMut(SessionUpdate),
+) -> ReplayEmission {
+    let mut emitted = false;
+    for update in updates {
+        match update {
+            SessionUpdate::Acp(mut n) => {
+                n.update = strip_context_wrappers(n.update);
+                emit(SessionUpdate::Acp(n));
+                emitted = true;
             }
+            SessionUpdate::Grow(n)
+                if matches!(
+                    &n.update,
+                    crate::extensions::notification::SessionUpdate::UiNotice(_)
+                        | crate::extensions::notification::SessionUpdate::ImageRecoveryOperation { .. }
+                        | crate::extensions::notification::SessionUpdate::TurnCompleted { .. }
+                        | crate::extensions::notification::SessionUpdate::TaskBackgrounded { .. }
+                        | crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
+                ) =>
+            {
+                emit(SessionUpdate::Grow(n));
+                emitted = true;
+            }
+            _ => {}
         }
-        Ok(emitted)
-    })?
-    else {
-        return Ok(ReplayEmission::Empty);
-    };
-    Ok(if emitted {
+    }
+    if emitted {
         ReplayEmission::Emitted
     } else {
         ReplayEmission::Empty
-    })
+    }
 }
 
 /// Stream durable Grow extension notifications from one already-resolved
@@ -4324,7 +4346,7 @@ pub fn stream_replay_grow_notifications_at<
         let mut emitted = false;
         for update in updates {
             if let SessionUpdate::Grow(notification) = update {
-                f(*notification.clone());
+                f(*notification);
                 emitted = true;
             }
         }

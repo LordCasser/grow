@@ -331,6 +331,26 @@ async fn rewound_prompt_reuse_preserves_the_discarded_identity_and_pages_the_new
             .collect::<Vec<_>>(),
         ["replacement user prompt", "selected user prompt"]
     );
+    // A delegated resume consumes the complete raw transcript of this same
+    // selected branch, including the tail past the rewind publication.
+    let opened = storage.open_session_for_observation(&info).unwrap();
+    let as_seed = |timeline: &chat_state::Timeline, rows| {
+        let seed = history::SeedPresentation::for_resume(timeline.surface_ids().to_vec(), rows);
+        serde_json::to_value(seed.into_facts(timeline).unwrap()).unwrap()
+    };
+    let full = opened.validated_timeline(info.id.0.as_ref()).unwrap();
+    let expected = as_seed(
+        &full.timeline,
+        full.history.into_prepare(&info.id, &full.timeline, None).unwrap().updates,
+    );
+    let restored = opened.with_resume_timeline(|cut| {
+        assert!(cut.history.indexed.is_some());
+        let rows = cut.history.prepare_for_seed(&info.id, &cut.timeline).unwrap();
+        as_seed(&cut.timeline, rows)
+    }).unwrap();
+    assert_eq!(restored, expected);
+    assert!(restored.to_string().contains("replacement user prompt"));
+    assert!(!restored.to_string().contains("discarded user prompt"));
     let prepared = recovered
         .history
         .prepare_indexed(&info.id, &recovered.timeline)

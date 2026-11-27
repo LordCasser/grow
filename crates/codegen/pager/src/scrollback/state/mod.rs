@@ -721,6 +721,24 @@ impl ScrollbackState {
         self.bump_content_generation();
     }
 
+    /// Worker-built seed rows have their own ID space. Give them fresh IDs
+    /// above every ID the live view has issued, including already removed rows.
+    pub(crate) fn prepend_child_seed_history(&mut self, mut history: ScrollbackState) {
+        let mut next_id = self.next_id;
+        history.entries = history
+            .entries
+            .into_values()
+            .map(|mut entry| {
+                let id = EntryId::new(next_id);
+                next_id += 1;
+                entry.id = id;
+                (id, entry)
+            })
+            .collect();
+        history.next_id = next_id;
+        self.replace_history_prefix(history, 0, false);
+    }
+
     /// Rewrite freshly projected history ids back to the ids already installed
     /// for the same rows. Live tail ids arrive only as user-echo adoption
     /// targets; `replace_history_prefix` consumes the tail copy in the same

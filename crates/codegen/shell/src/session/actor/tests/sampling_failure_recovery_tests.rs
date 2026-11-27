@@ -131,12 +131,13 @@ async fn late_attempt_during_replay_pause_is_resynced_and_cancelled_release_unbl
 fn queue_user(
     commands: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
     id: &str,
+    text: &str,
 ) -> tokio::sync::oneshot::Receiver<crate::session::commands::PromptTurnResult> {
     let (respond_to, response) = tokio::sync::oneshot::channel();
     commands
         .send(SessionCommand::QueuePrompt {
             prompt_id: id.into(),
-            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("继续"))],
+            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
             origin: crate::session::PromptOrigin::User,
             turn_kind: crate::session::TurnKind::User,
             client_identifier: None,
@@ -157,6 +158,101 @@ async fn finish_user(
         .await
         .expect("normal actor settlement must finish the prompt")
         .expect("actor must retain its prompt responder")
+}
+
+#[tokio::test]
+async fn slow_live_writer_ack_preserves_the_root_and_its_next_prompt() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence, mut persisted) = tokio::sync::mpsc::unbounded_channel();
+            tokio::task::spawn_local(async move {
+                while let Some(message) = persisted.recv().await {
+                    if let PersistenceMsg::FlushAndAck { respond_to } = message {
+                        let _ = respond_to.send(());
+                    }
+                }
+            });
+            let (mut actor, events) =
+                create_test_actor_ex(0, 256_000, 85, gateway, persistence).await;
+            let (chat_events, chat_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (writer, mut requests) = tokio::sync::mpsc::unbounded_channel();
+            let (held, wait_for_terminal) = tokio::sync::oneshot::channel();
+            tokio::task::spawn_local(async move {
+                let mut held = Some(held);
+                while let Some(PersistenceMsg::TimelineDurablyAndAck { event, respond_to }) =
+                    requests.recv().await
+                {
+                    if matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { .. })
+                    ) && let Some(terminal) = held.take()
+                    {
+                        terminal.send(respond_to).unwrap();
+                    } else {
+                        let _ = respond_to.send(Ok(()));
+                    }
+                }
+            });
+            actor.chat_state_handle = chat_state::ChatStateActor::spawn(
+                vec![sampling_types::ConversationItem::system(
+                    "test system prompt",
+                )],
+                actor.chat_state_handle.get_sampling_config().await.unwrap(),
+                Box::new(
+                    crate::session::timeline_persistence::ChannelTimelinePersistence::new(writer),
+                ),
+                chat_events,
+                Default::default(),
+            );
+            actor.events =
+                crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+            let root = actor.session_dir.clone();
+            let (commands, command_rx) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::task::spawn_local(super::super::run_loop::run_session(
+                std::sync::Arc::new(actor),
+                command_rx,
+                chat_rx,
+                events,
+                None,
+                std::sync::Arc::new(parking_lot::Mutex::new(
+                    workspace::file_system::CodebaseIndexManager::default(),
+                )),
+                root,
+                Default::default(),
+            ));
+            // /context runs a foreground host turn through the real root mailbox.
+            let mut first = queue_user(&commands, "slow-writer", "/context");
+            let ack = tokio::time::timeout(Duration::from_secs(10), wait_for_terminal)
+                .await
+                .unwrap()
+                .unwrap();
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(45)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !ack.is_closed(),
+                "an outstanding append still belongs to the live writer"
+            );
+            assert!(matches!(
+                first.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            ack.send(Ok(())).unwrap();
+            tokio::time::resume();
+            assert_eq!(
+                finish_user(first).await.unwrap().stop_reason,
+                acp::StopReason::EndTurn
+            );
+            let next = queue_user(&commands, "same-root", "/context");
+            assert_eq!(
+                finish_user(next).await.unwrap().stop_reason,
+                acp::StopReason::EndTurn
+            );
+            task.abort();
+            let _ = task.await;
+        })
+        .await;
 }
 
 #[test]
@@ -324,7 +420,7 @@ fn child_grant_survives_known_sampling_failure_but_closes_for_exhaustion_or_unkn
                         )
                         .await;
                     });
-                    let first = queue_user(&commands, "bad-sample");
+                    let first = queue_user(&commands, "bad-sample", "继续");
                     tokio::time::timeout(Duration::from_secs(30), held)
                         .await
                         .expect("failed Turn must reach its durable terminal")
@@ -344,7 +440,7 @@ fn child_grant_survives_known_sampling_failure_but_closes_for_exhaustion_or_unkn
                         "only confirmed usage, not a sampling error, determines grant completeness"
                     );
                     let before_continue = server.requests().len();
-                    let second = queue_user(&commands, "manual-continue");
+                    let second = queue_user(&commands, "manual-continue", "继续");
                     tokio::time::sleep(Duration::from_millis(30)).await;
                     assert_eq!(
                         server.requests().len(),

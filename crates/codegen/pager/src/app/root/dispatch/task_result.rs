@@ -584,6 +584,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             effects.extend(crate::app::agent_view::ensure_visible_history_timeline(app));
             effects
         }
+        TaskResult::ChildSeedHistoryLoaded { request, result } => {
+            crate::app::subagent::apply_child_seed_history(app, request, result);
+            vec![]
+        }
         TaskResult::DescendantStateRestored {
             agent_id,
             session_id,
@@ -772,6 +776,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_id,
             generation,
             result,
+            models,
             descendant_ownership,
             behavior,
             scheduler_snapshot,
@@ -798,6 +803,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent.show_toast(&format!("Session resync failed: {error}. Reload to retry."));
                 return vec![];
             }
+            if let Some(models) = models {
+                agent.session.models = Some(models).into();
+            }
             if let Some(snapshot) = scheduler_snapshot {
                 crate::app::acp_handler::apply_scheduler_load_snapshot(app, &session_id, snapshot);
             }
@@ -807,11 +815,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 descendant_ownership,
                 None,
             );
-            effects.extend(
-                app.agents
-                    .get_mut(&agent_id)
-                    .map_or_else(Vec::new, |agent| maybe_drain_queue(agent).effects),
-            );
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                effects.extend(super::reconcile_controls_after_reconnect(
+                    agent_id,
+                    agent,
+                    app.cli_effort_token.as_deref(),
+                ));
+                effects.extend(maybe_drain_queue(agent).effects);
+            }
             effects
         }
         TaskResult::SessionListLoaded {
@@ -857,10 +868,21 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             generation,
             detail,
         } => handle_card_detail_loaded(app, session_id, generation, detail),
+        TaskResult::PromptSessionMissing {
+            agent_id,
+            session_id,
+            prompt_id,
+        } => handle_prompt_response(
+            app,
+            agent_id,
+            Err("Session is no longer active".into()),
+            Some(session_id),
+            Some(prompt_id),
+        ),
         TaskResult::PromptResponse {
             agent_id,
             result,
-            http_status,
+            http_status: _,
             prompt_id,
         } => {
             if is_runtime_suspended_prompt_response(&result) {
@@ -871,7 +893,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 // newer prompt or session binding has taken ownership.
                 return vec![];
             }
-            handle_prompt_response(app, agent_id, result, http_status, prompt_id)
+            handle_prompt_response(app, agent_id, result, None, prompt_id)
         }
         TaskResult::QueueControlResolved {
             agent_id,

@@ -649,6 +649,7 @@ pub struct AgentView {
     pub(crate) session_binding_epoch: u32,
     pub(crate) descendant_restore_generation: u64,
     pub(crate) descendant_restore_pending: bool,
+    pub(crate) child_seed_history: Option<crate::app::subagent::ChildSeedHistory>,
     pub(crate) descendant_model_control_generation: u64,
     pub(crate) descendant_agent_control_generation: u64,
     /// Branch-bound older cursor mirrored from the history window.

@@ -1,0 +1,3 @@
+An append sent by ChatState has exactly one owner and one immutable sequence. Waiting on a live acknowledgement channel serializes following writes. Ordinary prompt/tool facts have no caller deadline. The 30-second retry budget applies after an actual retryable I/O error or a lost acknowledgement. An explicit caller deadline still bounds an in-flight barrier. A timeout before the first submission can return immediately with no pending event or uncertain commit. Cancellation still interrupts an outstanding writer.
+
+The earlier change moves the expensive resume lookup off the single-threaded embedded Shell runtime. This change prevents delays in servicing the persistence queue from retiring an ordinary foreground writer.

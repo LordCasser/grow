@@ -21,7 +21,14 @@ use chat_state::{
 };
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
-use std::{ffi::OsStr, fs::File, io, sync::Arc};
+use std::{
+    collections::HashMap,
+    ffi::OsStr,
+    fs::File,
+    io,
+    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    sync::{Arc, LazyLock, Mutex, Weak},
+};
 use uuid::Uuid;
 
 const TOOL: TableDefinition<&str, &[u8]> = TableDefinition::new("tool");
@@ -30,6 +37,9 @@ const REQUEST: TableDefinition<&str, &[u8]> = TableDefinition::new("request");
 const OPEN_REQUEST: TableDefinition<&str, &[u8]> = TableDefinition::new("open_request");
 const OPEN_CUT: TableDefinition<u64, &[u8]> = TableDefinition::new("open_at_frontier");
 const DISPLAY: TableDefinition<u64, &[u8]> = TableDefinition::new("display");
+// Seed inheritance preserves the raw tool stream. DISPLAY stores the folded
+// terminal Tool shape used by interactive pages.
+const SEED_DISPLAY: TableDefinition<u64, &[u8]> = TableDefinition::new("seed_display");
 const DISPLAY_IDS: TableDefinition<&str, &[u8]> = TableDefinition::new("display_id");
 const SUBAGENT_DISPLAY: TableDefinition<u64, &[u8]> = TableDefinition::new("subagent_display");
 const TOOL_DISPLAY: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("tool_display");
@@ -42,7 +52,10 @@ const INTERACTIONS: TableDefinition<(&str, &str), &[u8]> =
     TableDefinition::new("interaction_identity");
 const OPEN_INTERACTIONS: TableDefinition<(&str, &str), &[u8]> =
     TableDefinition::new("interaction_open");
-const EXECUTION_CUT: TableDefinition<u64, &[u8]> = TableDefinition::new("execution_at_frontier");
+const EXECUTION_CUT: TableDefinition<(u64, u64, u64), &[u8]> =
+    TableDefinition::new("execution_at_frontier");
+// Leave room for the B-tree key and leaf header in a 64 KiB page.
+const EXECUTION_CHUNK_BYTES: usize = 64 * 1024 - 128;
 const CONTROL_RECEIPTS: TableDefinition<(&str, &str), &[u8]> =
     TableDefinition::new("control_receipts");
 const CONTROL_UI: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("control_ui");
@@ -175,9 +188,34 @@ struct Entry {
     terminal: Option<DomainReference>,
 }
 
+// redb excludes a second open while a writer is resident. An observer can
+// start a read transaction on that same database after pinning its exact inode.
+type FileIdentity = (u64, u64);
+static OPEN_WRITERS: LazyLock<Mutex<HashMap<FileIdentity, Weak<Database>>>> =
+    LazyLock::new(Mutex::default);
+
+#[derive(Clone)]
+enum IndexDatabase {
+    Writer(Arc<Database>),
+    Reader(Arc<dyn ReadableDatabase + Send + Sync>),
+}
+
+impl IndexDatabase {
+    fn reader(&self) -> &dyn ReadableDatabase {
+        match self {
+            Self::Writer(db) => db.as_ref(),
+            Self::Reader(db) => db.as_ref(),
+        }
+    }
+
+    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        self.reader().begin_read()
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Index {
-    db: Arc<Database>,
+    db: IndexDatabase,
     directory: Arc<ContainedDirectory>,
     journal: LedgerFileStamp,
     file: Arc<File>,
@@ -187,6 +225,62 @@ impl std::fmt::Debug for Index {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolHistory").finish_non_exhaustive()
     }
+}
+
+/// Part zero holds the checkpoint header. Each Surface item is decoded on its
+/// own so restoring a cut never needs a second encoded copy of the whole Surface.
+fn read_execution_cut(
+    cuts: &impl ReadableTable<(u64, u64, u64), &'static [u8]>,
+    frontier: Frontier,
+) -> io::Result<Option<ExecutionCut>> {
+    let Some(mut runtime) = read_execution_part::<ExecutionCut>(cuts, frontier.bytes, 0)? else {
+        return Ok(None);
+    };
+    if runtime.domain != frontier.domain {
+        return Err(invalid("Runtime checkpoint differs from journal frontier"));
+    }
+    runtime.surface.load_items(|ordinal| {
+        read_execution_part(cuts, frontier.bytes, 1 + ordinal as u64)?
+            .ok_or_else(|| invalid("missing Runtime checkpoint Surface item"))
+    })?;
+    Ok(Some(runtime))
+}
+
+fn read_execution_part<T: serde::de::DeserializeOwned>(
+    cuts: &impl ReadableTable<(u64, u64, u64), &'static [u8]>,
+    bytes: u64,
+    part: u64,
+) -> io::Result<Option<T>> {
+    let mut chunks = cuts
+        .range((bytes, part, 0)..=(bytes, part, u64::MAX))
+        .map_err(io::Error::other)?;
+    let Some((last, value)) = chunks.next_back().transpose().map_err(io::Error::other)? else {
+        return Ok(None);
+    };
+    let last_offset = last.value().2;
+    if last_offset == 0 {
+        return decode(value.value()).map(Some);
+    }
+    let capacity = usize::try_from(last_offset)
+        .ok()
+        .and_then(|n| n.checked_add(value.value().len()))
+        .ok_or_else(|| invalid("invalid Runtime checkpoint length"))?;
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(capacity)
+        .map_err(io::Error::other)?;
+    for entry in chunks {
+        let (key, chunk) = entry.map_err(io::Error::other)?;
+        if key.value().2 != encoded.len() as u64 || chunk.value().len() != EXECUTION_CHUNK_BYTES {
+            return Err(invalid("missing Runtime checkpoint chunk"));
+        }
+        encoded.extend_from_slice(chunk.value());
+    }
+    if encoded.len() as u64 != last_offset {
+        return Err(invalid("missing Runtime checkpoint chunk"));
+    }
+    encoded.extend_from_slice(value.value());
+    decode(&encoded).map(Some)
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -278,12 +372,63 @@ impl Index {
         let db = builder
             .create_file(file.try_clone()?)
             .map_err(io::Error::other)?;
+        let db = Arc::new(db);
+        let metadata = file.metadata()?;
+        {
+            let mut writers = OPEN_WRITERS
+                .lock()
+                .expect("working index registry poisoned");
+            writers.retain(|_, writer| writer.strong_count() > 0);
+            writers.insert((metadata.dev(), metadata.ino()), Arc::downgrade(&db));
+        }
         Ok(Self {
-            db: Arc::new(db),
+            db: IndexDatabase::Writer(db),
             directory,
             journal,
             file: Arc::new(file),
         })
+    }
+
+    pub(super) fn open_observer(
+        directory: Arc<ContainedDirectory>,
+        file: File,
+        journal: LedgerFileStamp,
+    ) -> io::Result<Option<Self>> {
+        let metadata = file.metadata()?;
+        let writer = OPEN_WRITERS
+            .lock()
+            .expect("working index registry poisoned")
+            .get(&(metadata.dev(), metadata.ino()))
+            .and_then(Weak::upgrade);
+        let db: Arc<dyn ReadableDatabase + Send + Sync> = if let Some(writer) = writer {
+            writer
+        } else {
+            // redb's read-only open takes a path. Resolve the pinned descriptor,
+            // so renaming a session directory cannot redirect this open.
+            let descriptor = format!("/dev/fd/{}", file.as_raw_fd());
+            let mut builder = Database::builder();
+            builder.set_cache_size(8 * 1024 * 1024);
+            match builder.open_read_only(descriptor) {
+                Ok(reader) => Arc::new(reader),
+                Err(
+                    redb::DatabaseError::DatabaseAlreadyOpen | redb::DatabaseError::RepairAborted,
+                ) => {
+                    return Ok(None);
+                }
+                Err(redb::DatabaseError::Storage(redb::StorageError::Io(error)))
+                    if error.kind() == io::ErrorKind::NotFound =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        };
+        Ok(Some(Self {
+            db: IndexDatabase::Reader(db),
+            directory,
+            journal,
+            file: Arc::new(file),
+        }))
     }
 
     /// Sync the journal first. The database may lead the manifest if the
@@ -299,7 +444,10 @@ impl Index {
         read_reference: impl Fn(EventSeq) -> io::Result<Option<RecordRef>>,
         check_cancelled: impl Fn() -> io::Result<()>,
     ) -> io::Result<Frontier> {
-        let mut tx = self.db.begin_write().map_err(io::Error::other)?;
+        let IndexDatabase::Writer(writer) = &self.db else {
+            return Err(invalid("cannot advance an observed working index"));
+        };
+        let mut tx = writer.begin_write().map_err(io::Error::other)?;
         tx.set_quick_repair(true);
         let mut frontier = {
             let head = tx.open_table(HEAD).map_err(io::Error::other)?;
@@ -365,6 +513,7 @@ impl Index {
             let mut workflows = workflow_history::Writer::open(&tx)?;
             let mut compaction = super::compaction_history::Writer::open(&tx, frontier.bytes)?;
             let mut compaction_terminals = Vec::new();
+            let mut seed_display = tx.open_table(SEED_DISPLAY).map_err(io::Error::other)?;
             let mut notices = tx.open_table(DISPLAY).map_err(io::Error::other)?;
             let mut subagent_display = tx.open_table(SUBAGENT_DISPLAY).map_err(io::Error::other)?;
             let mut notice_anchors = tx
@@ -386,14 +535,11 @@ impl Index {
             let mut runtime_cuts = tx.open_table(EXECUTION_CUT).map_err(io::Error::other)?;
             let mut control_receipts = tx.open_table(CONTROL_RECEIPTS).map_err(io::Error::other)?;
             let mut control_ui = tx.open_table(CONTROL_UI).map_err(io::Error::other)?;
-            let mut runtime = match runtime_cuts.get(frontier.bytes).map_err(io::Error::other)? {
-                Some(row) => decode::<ExecutionCut>(row.value())?,
-                None if frontier.bytes == 0 => ExecutionCut::default(),
+            let mut runtime = match read_execution_cut(&runtime_cuts, frontier)? {
+                Some(cut) => cut,
+                None if frontier.bytes == 0 && frontier.domain == 0 => ExecutionCut::default(),
                 None => return Err(invalid("missing Runtime publication")),
             };
-            if runtime.domain != frontier.domain {
-                return Err(invalid("Runtime checkpoint differs from journal frontier"));
-            }
             let prior_usage = usage_cuts
                 .get(frontier.bytes)
                 .map_err(io::Error::other)?
@@ -529,6 +675,18 @@ impl Index {
                             unreachable!()
                         };
                         let encoded = serde_json::to_vec(&reference)?;
+                        if matches!(
+                            &event.content,
+                            HistoryContent::ToolCall(_)
+                                | HistoryContent::ToolUpdate(_)
+                                | HistoryContent::Notice { .. }
+                        ) || matches!(&event.content, HistoryContent::User(chunk) if !crate::session::history::provisional_user_echo(chunk))
+                            || matches!(&event.content, HistoryContent::Grow(value) if matches!(value.as_ref(), crate::session::history::GrowHistoryFact::UiNotice(_)))
+                        {
+                            seed_display
+                                .insert(record.seq, encoded.as_slice())
+                                .map_err(io::Error::other)?;
+                        }
                         if let Some(coverage) = event.recap_covered_main_turns() {
                             frontier.recap_covered_main_turns = Some(coverage);
                         }
@@ -705,11 +863,12 @@ impl Index {
                                 position: record.seq,
                                 record: reference.record,
                             };
+                            let encoded = serde_json::to_vec(&display)?;
                             notices
-                                .insert(
-                                    frontier.display_rows,
-                                    serde_json::to_vec(&display)?.as_slice(),
-                                )
+                                .insert(frontier.display_rows, encoded.as_slice())
+                                .map_err(io::Error::other)?;
+                            seed_display
+                                .insert(record.seq, encoded.as_slice())
                                 .map_err(io::Error::other)?;
                             frontier.display_rows += 1;
                             frontier.fallback_notice_rows += 1;
@@ -1174,11 +1333,22 @@ impl Index {
                 .map_err(io::Error::other)?;
             runtime.domain = domain;
             runtime_cuts
-                .retain(|key, _| key == previous.bytes)
+                .retain(|(cut, _, _), _| cut == previous.bytes)
                 .map_err(io::Error::other)?;
-            runtime_cuts
-                .insert(bytes, serde_json::to_vec(&runtime)?.as_slice())
-                .map_err(io::Error::other)?;
+            let mut write_part = |part: u64, encoded: Vec<u8>| -> io::Result<()> {
+                for (index, chunk) in encoded.chunks(EXECUTION_CHUNK_BYTES).enumerate() {
+                    let offset = (index * EXECUTION_CHUNK_BYTES) as u64;
+                    runtime_cuts
+                        .insert((bytes, part, offset), chunk)
+                        .map_err(io::Error::other)?;
+                }
+                Ok(())
+            };
+            let items = runtime.surface.take_items();
+            write_part(0, serde_json::to_vec(&runtime)?)?;
+            for (ordinal, item) in items.iter().enumerate() {
+                write_part(1 + ordinal as u64, serde_json::to_vec(item)?)?;
+            }
             cuts.insert(bytes, serde_json::to_vec(&open_at_cut)?.as_slice())
                 .map_err(io::Error::other)?;
             usage.set_frontier(EventSeq::new(domain));
@@ -1304,6 +1474,25 @@ impl Index {
         )
     }
 
+    pub(super) fn seed_display(
+        &self,
+        range: std::ops::RangeInclusive<u64>,
+    ) -> io::Result<Vec<DisplayReference>> {
+        let tx = self.db.begin_read().map_err(io::Error::other)?;
+        let rows = tx.open_table(SEED_DISPLAY).map_err(io::Error::other)?;
+        rows.range(range)
+            .map_err(io::Error::other)?
+            .map(|entry| {
+                let (position, value) = entry.map_err(io::Error::other)?;
+                let reference: DisplayReference = decode(value.value())?;
+                if reference.position != position.value() {
+                    return Err(invalid("seed display differs from indexed position"));
+                }
+                Ok(reference)
+            })
+            .collect()
+    }
+
     pub(super) fn subagent_display_before(&self, before: u64) -> io::Result<Vec<DisplayReference>> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         let rows = tx.open_table(SUBAGENT_DISPLAY).map_err(io::Error::other)?;
@@ -1394,18 +1583,18 @@ impl Index {
         query: crate::session::history::TimelineQuery,
         limit: usize,
     ) -> io::Result<crate::session::history::HistoryTimelinePage> {
-        super::history_timeline::read_page(&self.db, bytes, query, limit)
+        super::history_timeline::read_page(self.db.reader(), bytes, query, limit)
     }
 
     /// Tests prove a consecutive consume extends the published generation
     /// instead of rebuilding ranks.
     #[cfg(test)]
     pub(crate) fn timeline_generation(&self, bytes: u64) -> io::Result<u64> {
-        super::history_timeline::read_generation(&self.db, bytes)
+        super::history_timeline::read_generation(self.db.reader(), bytes)
     }
 
     pub(super) fn timeline_base_count(&self, bytes: u64) -> io::Result<Option<u64>> {
-        super::history_timeline::read_count(&self.db, bytes)
+        super::history_timeline::read_count(self.db.reader(), bytes)
     }
 
     pub(super) fn timeline_rank_bound(
@@ -1414,11 +1603,11 @@ impl Index {
         source: crate::session::history::HistorySourceKey,
         display_segment: Option<u32>,
     ) -> io::Result<super::history_timeline::RankBound> {
-        super::history_timeline::rank_lower_bound(&self.db, bytes, source, display_segment)
+        super::history_timeline::rank_lower_bound(self.db.reader(), bytes, source, display_segment)
     }
 
     pub(super) fn timeline_message_seen(&self, bytes: u64, message_id: &str) -> io::Result<bool> {
-        super::history_timeline::message_seen(&self.db, bytes, message_id)
+        super::history_timeline::message_seen(self.db.reader(), bytes, message_id)
     }
 
     pub(super) fn timeline_rank_window(
@@ -1427,7 +1616,7 @@ impl Index {
         start: u64,
         end: u64,
     ) -> io::Result<Vec<crate::session::history::HistoryTimelineEntry>> {
-        super::history_timeline::read_rank_window(&self.db, bytes, start, end)
+        super::history_timeline::read_rank_window(self.db.reader(), bytes, start, end)
     }
 
     pub(super) fn response_rows_after(
@@ -1619,15 +1808,8 @@ impl Index {
     pub(super) fn execution_checkpoint(&self, frontier: Frontier) -> io::Result<ExecutionCut> {
         let tx = self.db.begin_read().map_err(io::Error::other)?;
         let cuts = tx.open_table(EXECUTION_CUT).map_err(io::Error::other)?;
-        let row = cuts
-            .get(frontier.bytes)
-            .map_err(io::Error::other)?
-            .ok_or_else(|| invalid("missing published Runtime checkpoint"))?;
-        let runtime: ExecutionCut = decode(row.value())?;
-        if runtime.domain != frontier.domain {
-            return Err(invalid("Runtime checkpoint differs from journal frontier"));
-        }
-        Ok(runtime)
+        read_execution_cut(&cuts, frontier)?
+            .ok_or_else(|| invalid("missing published Runtime checkpoint"))
     }
 
     pub(super) fn recovery_snapshots(
@@ -2780,5 +2962,34 @@ impl ExecutionHistory for Cut {
             self.frontier.domain,
             seq,
         )
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn missing_execution_checkpoint_chunk_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::create(directory.path().join("execution.redb")).unwrap();
+        let write = db.begin_write().unwrap();
+        let mut cuts = write.open_table(EXECUTION_CUT).unwrap();
+        let frontier = Frontier {
+            bytes: 123,
+            domain: 1,
+            ..Default::default()
+        };
+        let block = vec![b' '; EXECUTION_CHUNK_BYTES];
+        cuts.insert((frontier.bytes, 0, 0), block.as_slice())
+            .unwrap();
+        cuts.insert(
+            (frontier.bytes, 0, 2 * EXECUTION_CHUNK_BYTES as u64),
+            &b"}"[..],
+        )
+        .unwrap();
+        let err = read_execution_cut(&cuts, frontier).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("missing Runtime checkpoint chunk"));
     }
 }

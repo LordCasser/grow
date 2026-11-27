@@ -1842,9 +1842,9 @@ async fn prepared_session_is_published_once_with_lineage_and_timeline() {
         published.0.parent_session_id.as_deref(),
         Some("parent-session")
     );
-    assert_eq!(published.1.len(), 2);
+    assert_eq!(published.1.events().len(), 2);
     assert!(matches!(
-        published.1[1].kind,
+        published.1.events()[1].kind,
         chat_state::TimelineEventKind::SubagentSeed(_)
     ));
     assert!(target.join(super::super::TIMELINE_FILE).is_file());
@@ -1941,6 +1941,102 @@ async fn prepared_session_atomically_publishes_the_exact_prompt_blob_set() {
                 .to_string_lossy()
                 .ends_with(".staging"))
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_seed_publication_yields_the_command_executor() {
+    let home = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(home.path().to_owned());
+    let info = create_test_info();
+    let summary = Summary::new(&info, default_model_id()).unwrap();
+    let write = writer.init_session_with_summary(
+        &info, summary,
+        vec![ConversationItem::assistant("a".repeat(4 * 1024 * 1024))],
+        Default::default(), Default::default(), Vec::new(),
+    );
+    tokio::pin!(write);
+    let start = std::time::Instant::now();
+    tokio::select! {
+        biased;
+        result = &mut write => {
+            result.unwrap();
+            panic!("child seed publication monopolized the executor for {:?}", start.elapsed());
+        }
+        _ = std::future::ready(()) => {}
+    }
+    let first_poll = start.elapsed();
+    write.await.unwrap();
+    eprintln!("4 MiB seed first poll {first_poll:?}, durable publication {:?}", start.elapsed());
+}
+
+#[tokio::test]
+async fn child_seed_history_uses_only_the_published_prefix_and_checks_identity() {
+    use crate::session::storage::{ReplayEmission, stream_child_seed_history_at};
+
+    for valid_identity in [true, false] {
+        let root = TempDir::new().unwrap();
+        let writer = JsonlStorageAdapter::with_root(root.path().to_owned());
+        let info = create_test_info();
+        let sid = info.id.0.as_ref();
+        let lineage = SessionLineage {
+            session_kind: "subagent_resume".into(),
+            context_source: "resumed".into(),
+            parent_session_id: "root".into(),
+            parent_prompt_id: None,
+            subagent_seed: chat_state::SubagentSeedEvent {
+                parent_timeline_id: "root".into(),
+                parent_spawn_seq: 1,
+                subagent_id: if valid_identity { sid } else { "other-child" }.into(),
+                security_parent_session_id: "direct-delegator".into(),
+                context_source: chat_state::SubagentContextSource::Resumed,
+                source_ref: None,
+                normalized: false,
+            },
+        };
+        let mut summary = Summary::new(&info, default_model_id()).unwrap();
+        lineage.apply_to(&mut summary);
+        let presentation = crate::session::history::SeedPresentation::for_resume(
+            Vec::new(),
+            vec![SessionUpdate::Acp(Box::new(create_test_notification()))],
+        );
+        let (_, mut timeline, seed_bytes) = writer.init_session_with_summary(
+            &info,
+            summary,
+            vec![ConversationItem::user("model seed")],
+            Default::default(),
+            presentation,
+            vec![chat_state::TimelineEventKind::SubagentSeed(lineage.subagent_seed)],
+        ).await.unwrap();
+        let cut = seed_bytes.unwrap();
+        let path = writer.timeline_file(&info);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), cut);
+        let read = |boundary| {
+            let mut rows = Vec::new();
+            let result = stream_child_seed_history_at(sid, root.path(), boundary, |row| rows.push(row));
+            (result, rows)
+        };
+        if !valid_identity {
+            let (result, rows) = read(cut);
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            assert!(rows.is_empty());
+            continue;
+        }
+        let after_seed = timeline.record(chat_state::TimelineEventKind::SessionTitle(
+            chat_state::SessionTitleEvent { title: "after seed".into(), source: chat_state::SessionTitleSource::User },
+        )).unwrap();
+        writer.append_timeline_event_durable(&info, &after_seed).await.unwrap();
+        let live_len = std::fs::metadata(path).unwrap().len();
+        let (result, rows) = read(cut);
+        assert_eq!(result.unwrap(), ReplayEmission::Emitted);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(describe_fork_replay(loaded_child_acp_updates(rows).into_iter()
+            .map(|notification| notification.update).collect()), ["message:Test response"]);
+        for boundary in [0, cut - 1, live_len, live_len + 1] {
+            let (result, rows) = read(boundary);
+            assert!(result.is_err(), "invalid seed boundary {boundary} was accepted");
+            assert!(rows.is_empty());
+        }
+    }
 }
 
 #[tokio::test]
@@ -2113,7 +2209,7 @@ async fn resume_seed_presentation_rebinds_display_to_the_new_seed() {
             route_update,
         ],
     );
-    let (summary, seed_events) = writer
+    let (summary, timeline, _) = writer
         .init_session_with_summary(
             &child_info,
             Summary::new(&child_info, default_model_id()).unwrap(),
@@ -2129,7 +2225,7 @@ async fn resume_seed_presentation_rebinds_display_to_the_new_seed() {
     let journal = std::fs::read_to_string(&journal_path).unwrap();
     assert_eq!(
         journal.lines().count(),
-        seed_events.len() + 4,
+        timeline.events().len() + 4,
         "seed domain event and four allowed presentation facts publish together"
     );
     assert!(
@@ -4352,6 +4448,12 @@ async fn test_subagent_notifications_round_trip() {
         session_id: acp::SessionId::new("parent-session"),
         update: GrowSessionUpdateType::SubagentSpawned {
             subagent_id: "child-001".to_string(),
+            spawn_details: Some(crate::extensions::notification::SubagentSpawnDetails {
+                prompt: "read the project README".into(),
+                child_cwd: "/test/workspace".into(),
+                worktree_path: None,
+                history: crate::extensions::notification::SubagentSpawnHistory::Empty,
+            }),
             parent_session_id: "parent-session".to_string(),
             parent_prompt_id: Some("turn-123".to_string()),
             child_session_id: "child-001".to_string(),
@@ -4399,8 +4501,10 @@ async fn test_subagent_notifications_round_trip() {
                     child_session_id,
                     description,
                     subagent_type,
+                    spawn_details,
                     ..
                 } => {
+                    assert!(spawn_details.is_none(), "live birth details are not journal facts");
                     assert_eq!(subagent_id, "child-001");
                     assert_eq!(child_session_id, "child-001");
                     assert_eq!(description, "Read README.md");
@@ -4462,6 +4566,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
         session_id: acp::SessionId::new("resume-parent"),
         update: GrowSessionUpdateType::SubagentSpawned {
             subagent_id: "child-resumed".to_string(),
+            spawn_details: None,
             parent_session_id: "resume-parent".to_string(),
             parent_prompt_id: Some("turn-5".to_string()),
             child_session_id: "child-resumed".to_string(),

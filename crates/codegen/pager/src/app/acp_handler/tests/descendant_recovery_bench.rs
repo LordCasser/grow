@@ -138,6 +138,7 @@ fn projected_spawn_update(
     };
     shell::extensions::notification::SessionUpdate::SubagentSpawned {
         subagent_id: spawn.subagent_id.clone(),
+        spawn_details: None,
         parent_session_id: parent_id.to_owned(),
         parent_prompt_id: spawn.parent_prompt_id.clone(),
         child_session_id: spawn.child_session_id.clone(),

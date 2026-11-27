@@ -144,6 +144,16 @@ impl ChatStateHandle {
         &self,
         subagent_id: String,
     ) -> Result<Option<crate::timeline::SubagentOperation>, String> {
+        Ok(self
+            .subagent_operation_at_cut(subagent_id)
+            .await?
+            .map(|cut| cut.operation))
+    }
+
+    pub async fn subagent_operation_at_cut(
+        &self,
+        subagent_id: String,
+    ) -> Result<Option<crate::timeline::SubagentOperationAtCut>, String> {
         self.query("GetSubagentOperation", |reply| {
             ChatStateCommand::GetSubagentOperation { subagent_id, reply }
         })

@@ -1,6 +1,8 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 mod delegation_identity_tests;
 mod observation_tests;
+#[cfg(unix)]
+mod resume_bench;
 mod workflow_recovery_tests;
 mod startup_publication_tests;
 use super::*;

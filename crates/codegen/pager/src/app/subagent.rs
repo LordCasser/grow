@@ -3,6 +3,9 @@
 //! Tracking state for spawned child sessions. [`SubagentInfo`] is the single
 //! source of truth — used by both the subagent pane (display) and the
 //! permission view (provenance labels).
+mod seed_history;
+pub(crate) use seed_history::*;
+
 #[cfg(test)]
 use shell::session::storage::stream_replay_updates_at;
 use shell::session::storage::{
@@ -79,8 +82,8 @@ pub struct SubagentInfo {
     pub prompt: Option<Arc<str>>,
     pub child_cwd: Option<Arc<str>>,
     pub worktree_path: Option<Arc<str>>,
-    /// Set after the first `replay_inherited_updates` attempt (spawn or open).
-    /// Prevents duplicate replay when scrollback is prompt-only after spawn.
+    /// Full durable replay is unnecessary while the live transcript is resident.
+    /// A new child may still be projecting its immutable seed into that transcript.
     pub child_updates_replayed: bool,
     /// The terminal delegation has no verified child transcript to open.
     pub history_unavailable: bool,
@@ -141,46 +144,6 @@ fn effective_grow_home() -> std::path::PathBuf {
     }
     shell::util::grow_home::grow_home()
 }
-/// Best-effort enrichment from the parent's canonical spawn fact.
-pub(crate) fn enrich_from_timeline(
-    info: &mut SubagentInfo,
-    _parent_cwd: &std::path::Path,
-    parent_session_id: &str,
-) {
-    enrich_from_timeline_with_home(info, &effective_grow_home(), parent_session_id);
-}
-fn enrich_from_timeline_with_home(
-    info: &mut SubagentInfo,
-    grow_home: &std::path::Path,
-    parent_session_id: &str,
-) {
-    let Ok(Some(timeline)) =
-        shell::session::storage::load_timeline_by_id_at(parent_session_id, grow_home)
-    else {
-        return;
-    };
-    let Some(spawn) =
-        timeline
-            .events()
-            .iter()
-            .find_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
-                    spawn,
-                )) if spawn.subagent_id == info.subagent_id.as_ref() => Some(spawn),
-                _ => None,
-            })
-    else {
-        return;
-    };
-    enrich_from_spawn(info, spawn);
-}
-
-fn enrich_from_spawn(info: &mut SubagentInfo, spawn: &chat_state::SubagentSpawnEvent) {
-    info.prompt = Some(Arc::from(spawn.prompt.as_str()));
-    info.child_cwd = Some(Arc::from(spawn.child_cwd.as_str()));
-    info.worktree_path = spawn.worktree_path.as_deref().map(Arc::from);
-}
-
 /// Apply one canonical spawn fact to both the flat subagent index and its
 /// already-created child view. Replay creates views before this batched pass,
 /// initially inheriting the parent CWD; the durable fact corrects that
@@ -840,6 +803,7 @@ fn apply_projected_spawn(
         owner_agent_id,
         SessionUpdate::SubagentSpawned {
             subagent_id: event.subagent_id.clone(),
+            spawn_details: None,
             parent_session_id: event.security_parent_session_id.clone(),
             parent_prompt_id: event.parent_prompt_id.clone(),
             child_session_id: event.child_session_id.clone(),
@@ -962,6 +926,13 @@ pub(crate) fn ensure_subagent_child_replayed(
     parent: &mut crate::app::agent_view::AgentView,
     child_sid: &str,
 ) -> bool {
+    if parent
+        .subagent_views
+        .get(child_sid)
+        .is_some_and(|child| child.child_seed_history.is_some())
+    {
+        return true;
+    }
     let should_replay = parent
         .session
         .subagent_sessions
@@ -1787,55 +1758,6 @@ mod tests {
         let (label, _) = format_subagent_label(&info);
         assert_eq!(label, "Custom-agent");
     }
-    fn write_spawn_timeline(
-        dir: &std::path::Path,
-        subagent_id: &str,
-        child_session_id: &str,
-        prompt: &str,
-        child_cwd: &str,
-        worktree_path: Option<&str>,
-    ) {
-        let mut timeline = chat_state::Timeline::default();
-        timeline
-            .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
-                    subagent_id: subagent_id.into(),
-                    child_session_id: child_session_id.into(),
-                    origin_tool_call_id: None,
-                    security_parent_session_id: "parent-session".into(),
-                    parent_step_id: None,
-                    subagent_type: "general-purpose".into(),
-                    description: "task".into(),
-                    prompt: prompt.into(),
-                    execution_recipe: serde_json::json!({}),
-                    context_source: chat_state::SubagentContextSource::New,
-                    source_ref: None,
-                    context_normalized: false,
-                    resumed_from: None,
-                    parent_prompt_id: None,
-                    parent_prompt_owner: None,
-                    capability_mode: None,
-                    birth_mcp_servers: Some(Default::default()),
-                    permission_mode: None,
-                    effective_permission_mode: None,
-                    workflow_run_id: None,
-                    goal_id: None,
-                    goal_definition_revision: None,
-                    surface_completion: true,
-                    child_cwd: child_cwd.into(),
-                    worktree_path: worktree_path.map(str::to_owned),
-                    effective_model_id: "grow-3".into(),
-                    model_transport_key: tools::types::resources::ModelImageInputKey::new(
-                        "grow-3",
-                        "responses",
-                        "test-endpoint",
-                    ),
-                    reasoning_effort: None,
-                })),
-            ))
-            .unwrap();
-        write_timeline_events(dir, &timeline);
-    }
     fn write_timeline_events(dir: &std::path::Path, timeline: &chat_state::Timeline) {
         write_history_fixture(dir, timeline, vec![]);
     }
@@ -2279,45 +2201,6 @@ mod tests {
         };
         assert!(!row.running);
         assert_eq!(row.message, "Image recovery interrupted");
-    }
-    #[test]
-    fn enrich_from_timeline_populates_fields() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = std::path::Path::new("/home/user/project");
-        let session_id = "sess-abc";
-        let session_dir = setup_enrichment_dir(tmp.path(), cwd, session_id);
-        write_spawn_timeline(
-            &session_dir,
-            "sa-1",
-            "child-1",
-            "do stuff",
-            "/tmp/work",
-            Some("/tmp/wt"),
-        );
-        let mut info = make_info();
-        enrich_from_timeline_with_home(&mut info, tmp.path(), session_id);
-        assert_eq!(info.prompt.as_deref(), Some("do stuff"));
-        assert_eq!(info.child_cwd.as_deref(), Some("/tmp/work"));
-        assert_eq!(info.worktree_path.as_deref(), Some("/tmp/wt"));
-    }
-    #[test]
-    fn enrich_from_timeline_missing_file_is_noop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut info = make_info();
-        enrich_from_timeline_with_home(&mut info, tmp.path(), "no-session");
-        assert!(info.prompt.is_none());
-        assert!(info.child_cwd.is_none());
-        assert!(info.worktree_path.is_none());
-    }
-    #[test]
-    fn enrich_from_timeline_malformed_json_is_noop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = std::path::Path::new("/home/user");
-        let session_dir = setup_enrichment_dir(tmp.path(), cwd, "sess-x");
-        std::fs::write(session_dir.join("timeline.jsonl"), "not json{{{\n").unwrap();
-        let mut info = make_info();
-        enrich_from_timeline_with_home(&mut info, tmp.path(), "sess-x");
-        assert!(info.prompt.is_none());
     }
     #[test]
     fn activity_label_thinking() {

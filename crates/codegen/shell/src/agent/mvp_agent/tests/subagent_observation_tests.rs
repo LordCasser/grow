@@ -8,7 +8,7 @@ async fn init_history_session(
     id: &str,
     parent: Option<&str>,
     facts: Vec<TimelineEventKind>,
-) -> (crate::session::info::Info, Vec<chat_state::TimelineEvent>) {
+) {
     let info = crate::session::info::Info {
         id: acp::SessionId::new(id),
         cwd: "/workspace".into(),
@@ -22,7 +22,7 @@ async fn init_history_session(
         summary.parent_session_id = Some(parent.into());
         summary.session_kind = Some("subagent".into());
     }
-    let (_, events) = storage
+    storage
         .init_session_with_summary(
             &info,
             summary,
@@ -33,7 +33,6 @@ async fn init_history_session(
         )
         .await
         .unwrap();
-    (info, events)
 }
 
 fn ext_request(session_id: &str, subagent_id: &str, block: bool) -> acp::ExtRequest {
@@ -237,7 +236,7 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
             crate::session::persistence::default_model_id(),
         )
         .unwrap();
-        let (_, root_events) = storage
+        let (_, mut root_timeline, _) = storage
             .init_session_with_summary(
                 &root_info,
                 root_summary,
@@ -250,7 +249,7 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
             )
             .await
             .unwrap();
-        let spawn_seq = root_events.last().unwrap().seq.get();
+        let spawn_seq = root_timeline.last_seq().unwrap().get();
 
         let child_info = crate::session::info::Info {
             id: acp::SessionId::new(child_id),
@@ -263,7 +262,7 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
         .unwrap();
         child_summary.parent_session_id = Some(root_id.into());
         child_summary.session_kind = Some("subagent".into());
-        let (_, child_events) = storage
+        let (_, mut child_timeline, _) = storage
             .init_session_with_summary(
                 &child_info,
                 child_summary,
@@ -284,7 +283,6 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
             )
             .await
             .unwrap();
-        let mut child_timeline = chat_state::Timeline::from_events(child_events).unwrap();
         let result = child_timeline
             .record(TimelineEventKind::SubagentResult(
                 chat_state::SubagentResultEvent {
@@ -305,7 +303,6 @@ async fn public_subagent_get_reads_only_the_authorized_canonical_cold_result() {
             .await
             .unwrap();
 
-        let mut root_timeline = chat_state::Timeline::from_events(root_events).unwrap();
         let result_seq = if corrupt_result_link {
             result.seq.get() + 1
         } else {

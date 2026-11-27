@@ -261,18 +261,29 @@ permission_mode = "ask"
                             serde_json::from_str::<
                                 crate::extensions::notification::SessionNotification,
                             >(args.request.params.get())
-                            && matches!(&notification.update, crate::extensions::notification::SessionUpdate::SubagentSpawned { child_session_id, .. } if child_session_id == "derived-child")
+                            && let crate::extensions::notification::SessionUpdate::SubagentSpawned {
+                                child_session_id, spawn_details, ..
+                            } = &notification.update
+                            && child_session_id == "derived-child"
                         {
-                            // Pager eagerly reads inherited history at the
-                            // live Spawned boundary, before child output.
-                            *eager_seen.borrow_mut() = Some(transcript(
-                                crate::session::storage::load_updates_for_replay_at(
-                                    "derived-child",
-                                    &read_home,
-                                )
-                                .unwrap()
-                                .unwrap(),
-                            ));
+                            let crate::extensions::notification::SubagentSpawnHistory::Inherited {
+                                seed_history_bytes,
+                            } = spawn_details.as_ref().unwrap().history else {
+                                panic!("resumed child must publish its inherited display boundary");
+                            };
+                            let mut inherited = Vec::new();
+                            let emission = crate::session::storage::stream_child_seed_history_at(
+                                child_session_id,
+                                &read_home,
+                                seed_history_bytes,
+                                |row| {
+                                    if let crate::session::storage::SessionUpdate::Acp(row) = row {
+                                        inherited.push(row.update);
+                                    }
+                                },
+                            ).unwrap();
+                            assert_eq!(emission, crate::session::storage::ReplayEmission::Emitted);
+                            *eager_seen.borrow_mut() = Some(transcript(inherited));
                         }
                         let _ = args.response_tx.send(Ok(()));
                     }

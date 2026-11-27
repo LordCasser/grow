@@ -187,7 +187,7 @@ pub enum ChatStateCommand {
     GetSubagentOperation {
         subagent_id: String,
         reply: oneshot::Sender<
-            Result<Option<crate::timeline::SubagentOperation>, crate::TimelineError>,
+            Result<Option<crate::timeline::SubagentOperationAtCut>, crate::TimelineError>,
         >,
     },
     GetSubagentHistory {

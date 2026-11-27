@@ -124,6 +124,7 @@ pub enum SessionLiveState {
 /// and should be stored/managed by the caller.
 #[derive(Clone)]
 pub struct SessionHandle {
+    pub(crate) writer_journal: super::storage::jsonl::WriterJournal,
     /// External ownership lease. Internal actor bridges may retain command
     /// senders, but they do not retain this lease; dropping the last real
     /// handle therefore requests deterministic teardown instead of waiting

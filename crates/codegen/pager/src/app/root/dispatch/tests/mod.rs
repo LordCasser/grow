@@ -67,6 +67,7 @@ fn control_rpc_accepted() -> Result<ControlRpcOutcome, ControlRequestFailure> {
 fn local_control_failure(message: impl Into<String>) -> ControlRequestFailure {
     ControlRequestFailure {
         message: message.into(),
+        session_missing: false,
         terminal_published: false,
     }
 }

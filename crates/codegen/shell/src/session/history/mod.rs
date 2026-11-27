@@ -91,10 +91,12 @@ pub(crate) struct PageWindow {
     pub newer_position: Option<PagePosition>,
     pub target_source: Option<HistorySourceKey>,
 }
+#[cfg(test)]
+pub(crate) use projector::HISTORY_PAGE_BYTES;
+#[cfg(any(unix, test))]
+pub(crate) use projector::HISTORY_PAGE_ROWS;
 #[cfg(unix)]
 pub(crate) use projector::command_settlement_update;
-#[cfg(test)]
-pub(crate) use projector::{HISTORY_PAGE_BYTES, HISTORY_PAGE_ROWS};
 mod seed;
 pub(crate) use seed::SeedPresentation;
 

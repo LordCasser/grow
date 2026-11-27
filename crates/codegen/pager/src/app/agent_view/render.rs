@@ -82,6 +82,9 @@ impl AgentView {
     /// `updates.jsonl` when scrollback only has the injected task prompt.
     pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
         if let Some(child) = self.subagent_views.get_mut(&child_sid) {
+            if let Some(seed) = &mut child.child_seed_history {
+                seed.retry_on_open();
+            }
             child.mark_as_subagent_view();
             child.leader_key_started_at = None;
         } else {

@@ -19,6 +19,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
     let (tx, _rx) = mpsc::unbounded_channel();
     let (goal_tx, _goal_rx) = mpsc::unbounded_channel();
     SubagentSpawnContext {
+        parent_journal: Default::default(),
         storage_admission: Arc::new(crate::session::storage_admission::StorageAdmission::new(
             crate::util::grow_home::grow_home().to_path_buf(),
         )),

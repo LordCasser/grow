@@ -879,6 +879,31 @@ impl HistorySnapshot {
         self.prepare_for_projection(session, timeline, cursor, false)
     }
 
+    /// Restore the original ordered transcript, including intermediate Tool
+    /// changes that interactive history pages usually collapse.
+    pub(crate) fn prepare_for_seed(
+        self,
+        session: &acp::SessionId,
+        timeline: &chat_state::Timeline,
+    ) -> io::Result<Vec<SessionUpdate>> {
+        #[cfg(unix)]
+        if let Some(index) = &self.indexed {
+            let updates = self.prepare_indexed(session, timeline)?.updates;
+            let mut ordered = Vec::with_capacity(updates.len());
+            for update in updates {
+                let cursor = cursor_from_update(&update)
+                    .ok_or_else(|| invalid("missing seed history position"))?;
+                if index.visible_range(cursor.record)?.contains(&cursor.record) {
+                    ordered.push(((cursor.record, cursor.part as u64), update));
+                }
+            }
+            index.append_seed_history(session, &self, &mut ordered)?;
+            ordered.sort_unstable_by_key(|(position, _)| *position);
+            return Ok(ordered.into_iter().map(|(_, update)| update).collect());
+        }
+        Ok(self.into_prepare(session, timeline, None)?.updates)
+    }
+
     pub(crate) fn prepare_indexed(
         &self,
         session: &acp::SessionId,

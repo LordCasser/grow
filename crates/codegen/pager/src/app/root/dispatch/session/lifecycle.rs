@@ -1033,6 +1033,12 @@ pub(in crate::app::root::dispatch) fn handle_switch_model_complete(
         crate::app::actions::ControlRequestFailure,
     >,
 ) -> Vec<Effect> {
+    let reload_root = result.as_ref().is_err_and(|error| error.session_missing)
+        && app.agents.get(&agent_id).is_some_and(|root| {
+            root.session.session_id.as_ref() == Some(&session_id)
+                && root.session_reload.is_none()
+                && !root.session.loading_replay
+        });
     if let Some(agent) =
         super::super::ctx::find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
     {
@@ -1073,6 +1079,11 @@ pub(in crate::app::root::dispatch) fn handle_switch_model_complete(
             agent,
             session_id.0.as_ref(),
         );
+        if reload_root {
+            return crate::app::acp_handler::session_resync_effect(app, agent_id, None)
+                .into_iter()
+                .collect();
+        }
         let drain = maybe_drain_queue(agent);
         effects.extend(drain.effects);
         let page_flip_entry = drain.page_flip_entry;

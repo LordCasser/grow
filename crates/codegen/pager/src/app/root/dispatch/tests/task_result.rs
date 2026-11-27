@@ -2827,6 +2827,7 @@ fn shell_owned_control_failure_does_not_duplicate_a_local_notice() {
             agent_name: "missing".into(),
             result: Err(ControlRequestFailure {
                 message: "unknown Agent".into(),
+                session_missing: false,
                 terminal_published: true,
             }),
         }),
@@ -4526,4 +4527,74 @@ fn delete_session_late_success_preserves_a_replacement_binding_and_its_registry(
             .iter()
             .any(|effect| matches!(effect, Effect::UnregisterActiveSession { .. }))
     );
+}
+
+#[test]
+fn missing_session_model_rejection_only_recovers_its_current_control() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model = shell::agent::models::ModelId::new("model");
+    let stale = begin_model_control(&mut app, id, model.clone(), None);
+    let current = begin_model_control(&mut app, id, model.clone(), None);
+    let reject = |control_token| {
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            control_token,
+            model_id: model.clone(),
+            effort: None,
+            result: Err(ControlRequestFailure {
+                session_missing: true,
+                terminal_published: false,
+                message: "unknown session id".into(),
+            }),
+        })
+    };
+    assert!(dispatch(reject(stale), &mut app).is_empty());
+    let effects = dispatch(reject(current), &mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::ResyncSession { session_id, .. }]
+        if session_id.0.as_ref() == "test-session")
+    );
+}
+
+#[test]
+fn missing_session_child_model_rejection_does_not_reload_the_parent() {
+    let mut app = test_app_with_agent();
+    let root = AgentId(0);
+    let sid = acp::SessionId::new("finished-child");
+    let model_id = shell::agent::models::ModelId::new("model");
+    let mut child = make_test_agent_session(&app, AgentId(99), sid.0.as_ref());
+    let (control_token, _) = child
+        .enqueue_control(crate::app::session::PendingSessionControl::Model {
+            model_id: model_id.clone(),
+            effort: None,
+            effort_patch: false,
+        })
+        .unwrap();
+    app.agents.get_mut(&root).unwrap().insert_subagent_view(
+        sid.0.to_string(),
+        Box::new(AgentView::new(child, ScrollbackState::new())),
+    );
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: root,
+            session_id: sid,
+            control_token,
+            model_id,
+            effort: None,
+            result: Err(ControlRequestFailure {
+                session_missing: true,
+                terminal_published: false,
+                message: "unknown session id".into(),
+            }),
+        }),
+        &mut app,
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ResyncSession { .. }))
+    );
+    assert!(app.agents[&root].session_reload.is_none());
 }

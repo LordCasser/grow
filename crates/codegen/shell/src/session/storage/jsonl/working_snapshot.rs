@@ -70,7 +70,7 @@ impl IndexedUserEchoRow {
     }
 }
 
-const VERSION: u8 = 54;
+const VERSION: u8 = 57;
 const MANIFEST: &str = "working-history.json";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 #[cfg(unix)]
@@ -1339,6 +1339,10 @@ fn retained_index_name(generation: uuid::Uuid) -> String {
     format!("timeline-{generation}.retained")
 }
 
+#[cfg(unix)]
+#[path = "working_snapshot/seed_history.rs"]
+mod seed_history;
+
 pub(crate) struct IndexedHistoryReader<'a> {
     history: &'a IndexedHistory,
     journal: File,
@@ -1379,7 +1383,7 @@ impl IndexedHistoryReader<'_> {
                 .subagent_display_before(self.history.records())?
             {
                 let Some(SessionUpdate::Grow(notification)) =
-                    self.project_display(reference, session, history)?
+                    self.project_display(reference, session, history, true)?
                 else {
                     return Err(invalid("indexed child lifecycle row has no Grow update"));
                 };
@@ -1823,7 +1827,7 @@ impl IndexedHistoryReader<'_> {
             return Err(invalid("Tool byte cursor names an ordinary display row"));
         }
         Ok(self
-            .project_display(reference, session, history)?
+            .project_display(reference, session, history, true)?
             .map(|update| (None, update)))
     }
 
@@ -1879,7 +1883,7 @@ impl IndexedHistoryReader<'_> {
                 return Err(invalid("Tool byte cursor names an ordinary display row"));
             }
             Ok(self
-                .project_display(reference, session, history)?
+                .project_display(reference, session, history, true)?
                 .map(|update| (None, update)))
         }
         #[cfg(not(unix))]
@@ -1895,6 +1899,7 @@ impl IndexedHistoryReader<'_> {
         reference: super::tool_history::DisplayReference,
         session: &acp::SessionId,
         history: &HistorySnapshot,
+        fold_tools: bool,
     ) -> io::Result<Option<SessionUpdate>> {
         let pos = reference.position;
         let record = self.read_display(reference)?;
@@ -1975,7 +1980,8 @@ impl IndexedHistoryReader<'_> {
                 )
             }
         };
-        if let SessionUpdate::Acp(notification) = &mut update
+        if fold_tools
+            && let SessionUpdate::Acp(notification) = &mut update
             && let acp::SessionUpdate::ToolCallUpdate(change) = &mut notification.update
             && let Some(mut call) = self.tool_before(&change.tool_call_id, pos)?
         {
@@ -2440,6 +2446,182 @@ pub(super) fn load(
     path: &Path,
     cached: Option<IndexedHistory>,
 ) -> io::Result<Option<(ValidatedTimeline, LedgerPrefix)>> {
+    let Some((index, retained)) =
+        open_published_cut(opened, file, complete_len, HistoryAccess::Writer(cached))?
+    else {
+        return Ok(None);
+    };
+    hydrate(opened, file, complete_len, path, index, retained)
+}
+
+/// Inspect the same publication used for cold execution without claiming its
+/// writer or repairing any sidecar. Callers hold the journal append lock.
+#[cfg(unix)]
+pub(super) fn load_read_only(
+    opened: &OpenedSession,
+    file: &mut File,
+    complete_len: u64,
+    path: &Path,
+) -> io::Result<Option<ValidatedTimeline>> {
+    let Some((index, retained)) =
+        open_published_cut(opened, file, complete_len, HistoryAccess::Observer)?
+    else {
+        return Ok(None);
+    };
+    hydrate(opened, file, complete_len, path, index, retained)
+        .map(|cut| cut.map(|(validated, _)| validated))
+}
+
+/// The actor validates causality. Match its domain frontier to the writer's
+/// committed inode and check the two immutable records on that very file.
+#[cfg(unix)]
+pub(super) fn confirm_writer_operation(
+    writer: &super::WriterJournal,
+    file: &mut File,
+    complete: u64,
+    cut: &chat_state::timeline::SubagentOperationAtCut,
+) -> io::Result<bool> {
+    let Some(owner) = writer.0.upgrade() else {
+        return Ok(false);
+    };
+    // Match append and publication lock order: journal first, then prefix.
+    // Concurrent readers snapshot offsets here and release the mutex before I/O.
+    let stamp = LedgerFileStamp::from_metadata(&file.metadata()?);
+    let guard = owner
+        .lock()
+        .map_err(|_| io::Error::other("Timeline prefix state poisoned"))?;
+    let Some(prefix) = guard.as_ref() else {
+        return Ok(false);
+    };
+    if prefix.len != complete || prefix.state.events != cut.next_seq.get() || prefix.stamp != stamp
+    {
+        return Ok(false);
+    }
+    let Some(index) = prefix.indexed.clone() else {
+        return Ok(false);
+    };
+    let (spawn_seq, spawn, terminal) = &cut.operation;
+    let (Some(end_seq), Some(ended)) = (cut.terminal_seq, terminal) else {
+        return Ok(false);
+    };
+    let tail_ref = |seq: chat_state::EventSeq| {
+        let n = usize::try_from(seq.get().checked_sub(index.manifest.domain_events)?).ok()?;
+        prefix.unpublished_domain.get(n).copied()
+    };
+    let end_ref = tail_ref(end_seq);
+    let spawn_ref = tail_ref(*spawn_seq);
+    drop(guard);
+
+    let mut read = |seq, in_tail| -> io::Result<chat_state::TimelineEventKind> {
+        let reference = match in_tail {
+            Some(reference) => reference,
+            None => read_indexed_domain_reference(&index.directory, &index.manifest, seq)?
+                .ok_or_else(|| invalid("missing writer lifecycle record"))?,
+        };
+        match working_index::read_record(file, reference)?.fact {
+            JournalFact::Domain { event, .. } if event.seq == seq => Ok(event.kind),
+            _ => Err(invalid("writer lifecycle record has a different sequence")),
+        }
+    };
+    use chat_state::{SubagentEvent, TimelineEventKind};
+    let end_matches = matches!(read(end_seq, end_ref)?,
+        TimelineEventKind::Subagent(SubagentEvent::Ended(value)) if &value == ended);
+    let spawn_matches = matches!(read(*spawn_seq, spawn_ref)?,
+        TimelineEventKind::Subagent(SubagentEvent::Spawned(value)) if value.as_ref() == spawn);
+    Ok(end_matches && spawn_matches)
+}
+
+#[cfg(unix)]
+pub(super) fn open_published_history_for_read(
+    opened: &OpenedSession,
+    file: &File,
+    complete_len: u64,
+) -> io::Result<Option<IndexedHistory>> {
+    open_published_cut(opened, file, complete_len, HistoryAccess::Observer)
+        .map(|cut| cut.map(|(index, _)| index))
+}
+
+#[cfg(unix)]
+pub(super) fn parent_lifecycle_for_read(
+    opened: &OpenedSession,
+    file: &mut File,
+    complete_len: u64,
+    path: &Path,
+) -> io::Result<Option<chat_state::Timeline>> {
+    let Some(index) = open_published_history_for_read(opened, file, complete_len)? else {
+        return Ok(None);
+    };
+    let source = &index.manifest;
+    let base = chat_state::Timeline::from_working_prefix(
+        Vec::new(),
+        chat_state::EventSeq::new(source.domain_events),
+        source.first_domain_at_ms,
+        Some(Arc::new(index.tools.cut(index.clone())?)),
+        None,
+        false,
+        None,
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if source.bytes == complete_len {
+        return Ok(Some(base));
+    }
+
+    // Terminals depend on the delegation index alone. Other execution facts
+    // can depend on published runtime, Surface or presentation state.
+    let mut suffix = Vec::new();
+    let mut needs_working_state = source.tool_frontier.child_seed.is_some();
+    if !needs_working_state {
+        let mut state = history::AppendState {
+            records: source.records,
+            events: source.domain_events,
+            ..Default::default()
+        };
+        JsonlStorageAdapter::scan_journal_bytes(
+            file,
+            source.bytes..complete_len,
+            path,
+            &mut blake3::Hasher::new(),
+            None,
+            None,
+            |record, _, _| {
+                if !matches!(&record.fact, JournalFact::Domain { event, .. }
+                    if matches!(&event.kind,
+                        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(_)))
+                        || chat_state::Timeline::is_diagnostic(event))
+                {
+                    needs_working_state = true;
+                    return Ok(false);
+                }
+                state.accept(&record)?;
+                if let JournalFact::Domain { event, .. } = record.fact {
+                    suffix.push(event);
+                }
+                Ok(true)
+            },
+        )?;
+    }
+    if needs_working_state {
+        return load_read_only(opened, file, complete_len, path)
+            .map(|loaded| loaded.map(|cut| cut.timeline));
+    }
+    base.with_replayed_suffix(suffix)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(unix)]
+enum HistoryAccess {
+    Writer(Option<IndexedHistory>),
+    Observer,
+}
+
+#[cfg(unix)]
+fn open_published_cut(
+    opened: &OpenedSession,
+    file: &File,
+    complete_len: u64,
+    access: HistoryAccess,
+) -> io::Result<Option<(IndexedHistory, File)>> {
     let directory = opened.directory_handle();
     let Some(manifest) = read_manifest(&directory)? else {
         return Ok(None);
@@ -2462,9 +2644,11 @@ pub(super) fn load(
     if check_index_sources(&manifest, file, &disk_index).is_err() {
         return Ok(None);
     }
-    let index = {
+    let Some(index) = ({
         let _timer = crate::instrumentation_timer!("session.load.working_index_open");
-        open_history(directory, manifest, cached)?
+        open_history_with_access(directory, manifest, access)?
+    }) else {
+        return Ok(None);
     };
     let retained = match index.directory.open_regular(
         OsStr::new(&retained_index_name(index.manifest.generation)),
@@ -2482,7 +2666,7 @@ pub(super) fn load(
     {
         return Ok(None);
     }
-    hydrate(opened, file, complete_len, path, index, retained)
+    Ok(Some((index, retained)))
 }
 
 #[cfg(unix)]
@@ -2491,6 +2675,16 @@ fn open_history(
     manifest: Manifest,
     cached: Option<IndexedHistory>,
 ) -> io::Result<IndexedHistory> {
+    open_history_with_access(directory, manifest, HistoryAccess::Writer(cached))?
+        .ok_or_else(|| invalid("working index unavailable for writer"))
+}
+
+#[cfg(unix)]
+fn open_history_with_access(
+    directory: Arc<ContainedDirectory>,
+    manifest: Manifest,
+    access: HistoryAccess,
+) -> io::Result<Option<IndexedHistory>> {
     let named = directory.open_regular(
         OsStr::new(&super::tool_history::name(manifest.generation)),
         "Tool index",
@@ -2504,23 +2698,36 @@ fn open_history(
     {
         return Err(invalid("Tool index differs from published frontier"));
     }
-    let tools = match cached {
-        Some(index) if index.manifest.generation == manifest.generation => index.tools,
-        _ => super::tool_history::Index::open(
+    let tools = match access {
+        HistoryAccess::Writer(Some(index)) if index.manifest.generation == manifest.generation => {
+            index.tools
+        }
+        HistoryAccess::Writer(_) => super::tool_history::Index::open(
             directory.clone(),
             manifest.generation,
             manifest.journal.clone(),
             false,
         )?,
+        HistoryAccess::Observer => {
+            let Some(tools) = super::tool_history::Index::open_observer(
+                directory.clone(),
+                named,
+                manifest.journal.clone(),
+            )?
+            else {
+                return Ok(None);
+            };
+            tools
+        }
     };
     if !manifest.tool_stamp.same_file(&tools.stamp()?) {
         return Err(invalid("Tool index was replaced during open"));
     }
-    Ok(IndexedHistory {
+    Ok(Some(IndexedHistory {
         directory,
         manifest: Arc::new(manifest),
         tools,
-    })
+    }))
 }
 
 /// Retain indexing when a caller requires the dense projection or opens the
@@ -3127,6 +3334,71 @@ mod tests {
 
     const TEST: &str = "session::storage::jsonl::working_snapshot::tests::process_exit_around_index_publication_recovers_exact_tail";
     const ADVANCE_TEST: &str = "session::storage::jsonl::working_snapshot::tests::process_exit_around_frontier_advance_preserves_domain_sequence";
+
+    #[tokio::test]
+    async fn resume_observer_uses_the_pinned_resident_or_closed_working_index() {
+        let root = tempfile::tempdir().unwrap();
+        let info = Info {
+            id: acp::SessionId::new("resume-observer"),
+            cwd: root.path().to_string_lossy().into_owned(),
+        };
+        let writer = JsonlStorageAdapter::with_root(root.path().to_owned());
+        writer
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
+        let timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::system("seed")])
+                .unwrap();
+        writer
+            .append_timeline_event_durable(&info, &timeline.events()[0])
+            .await
+            .unwrap();
+        let resident = writer
+            .load_session_for_write_with_indexed_history(&info)
+            .await
+            .unwrap();
+        assert!(resident.history.indexed.is_some());
+
+        let reader = JsonlStorageAdapter::with_root(root.path().to_owned());
+        let opened = reader
+            .open_session_by_id_shared_read(info.id.0.as_ref())
+            .unwrap()
+            .unwrap();
+        let directory = opened.directory();
+        let name = OsStr::new(TIMELINE_FILE);
+        let path = directory.display_path().join(name);
+        let observe = || {
+            let _lock = JsonlStorageAdapter::lock_append_contained(directory, name, &path).unwrap();
+            let mut journal = directory.open_regular(name, "journal").unwrap();
+            let bytes = journal.metadata().unwrap().len();
+            let manifest = read_manifest(directory).unwrap().unwrap();
+            let tools = directory
+                .open_regular(
+                    OsStr::new(&super::super::tool_history::name(manifest.generation)),
+                    "Tool index",
+                )
+                .unwrap();
+            let stamp = LedgerFileStamp::from_metadata(&tools.metadata().unwrap());
+            let recovered = load_read_only(&opened, &mut journal, bytes, &path)
+                .unwrap()
+                .expect("indexed recovery");
+            assert_eq!(
+                serde_json::to_value(recovered.timeline.surface()).unwrap(),
+                serde_json::to_value(timeline.surface()).unwrap()
+            );
+            assert_eq!(recovered.timeline.next_seq(), timeline.next_seq());
+            drop(recovered);
+            assert_eq!(
+                stamp,
+                LedgerFileStamp::from_metadata(&tools.metadata().unwrap())
+            );
+        };
+        observe();
+        drop(resident);
+        drop(writer);
+        observe();
+    }
 
     #[test]
     fn process_exit_around_frontier_advance_preserves_domain_sequence() {
@@ -3962,6 +4234,7 @@ mod tests {
             .load_session_for_write_with_indexed_history(&info)
             .await
             .unwrap();
+        assert_seed_matches_dense(&storage.open_session_for_observation(&info).unwrap());
         assert!(restored.timeline.pending_notifications().is_empty());
         assert!(
             restored
@@ -7192,6 +7465,7 @@ mod tests {
                 .load_session_for_write_with_indexed_history(&info)
                 .await
                 .unwrap();
+            assert_seed_matches_dense(&storage.open_session_for_observation(&info).unwrap());
             assert_eq!(cold.timeline.surface_ids(), dense.surface_ids());
             assert_eq!(cold.timeline.event(consumed.seq).is_none(), publish);
             assert!(cold.timeline.exact_event(consumed.seq).unwrap().is_some());
@@ -7403,6 +7677,7 @@ mod tests {
                 .load_session_for_write_with_indexed_history(&info)
                 .await
                 .unwrap();
+            assert_seed_matches_dense(&storage.open_session_for_observation(&info).unwrap());
             let prepared = loaded
                 .history
                 .prepare_indexed(&info.id, &loaded.timeline)
@@ -7789,6 +8064,7 @@ mod tests {
             .load_session_for_write_with_indexed_history(&info)
             .await
             .unwrap();
+        assert_seed_matches_dense(&storage.open_session_for_observation(&info).unwrap());
         let history = loaded.history;
         let prepared = history.prepare_indexed(&info.id, &loaded.timeline).unwrap();
         let pages = history.indexed_pages(prepared).unwrap().unwrap();
@@ -7869,6 +8145,39 @@ mod tests {
         assert_eq!(forward, original);
     }
 
+    fn assert_seed_matches_dense(opened: &OpenedSession) {
+        let id = &opened.summary().info.id;
+        let dense = opened.validated_timeline(id.0.as_ref()).unwrap();
+        let expected = history::SeedPresentation::for_resume(
+            dense.timeline.surface_ids().to_vec(),
+            dense
+                .history
+                .into_prepare(id, &dense.timeline, None)
+                .unwrap()
+                .updates,
+        )
+        .into_facts(&dense.timeline)
+        .unwrap();
+        // The fast path must be used; otherwise a successful dense fallback
+        // would hide missing intermediate Tool updates or published response bodies.
+        opened
+            .with_resume_timeline(|cut| -> io::Result<()> {
+                assert!(cut.history.indexed.is_some());
+                let facts = history::SeedPresentation::for_resume(
+                    cut.timeline.surface_ids().to_vec(),
+                    cut.history.prepare_for_seed(id, &cut.timeline)?,
+                )
+                .into_facts(&cut.timeline)?;
+                assert_eq!(
+                    serde_json::to_value(facts)?,
+                    serde_json::to_value(&expected)?
+                );
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn paged_tool_terminal_recovers_fields_from_before_the_page() {
         use super::super::AppendDurability;
@@ -7886,6 +8195,15 @@ mod tests {
             .unwrap();
         let tool = acp::ToolCallId::new("old-tool");
         let mut facts = vec![
+            HistoryContent::Grow(Box::new(history::GrowHistoryFact::SessionRecap {
+                summary: "unrelated display".repeat(100_000),
+                auto: false,
+                away_period_id: None,
+            })),
+            HistoryContent::ToolUpdate(acp::ToolCallUpdate::new(
+                "orphan",
+                acp::ToolCallUpdateFields::new().title("standalone update".to_owned()),
+            )),
             HistoryContent::ToolCall(acp::ToolCall::new(tool.clone(), "original")),
             HistoryContent::ToolUpdate(acp::ToolCallUpdate::new(
                 tool.clone(),
@@ -7941,6 +8259,9 @@ mod tests {
             .await
             .unwrap();
         assert!(loaded.history.sources.is_empty());
+        let index = loaded.history.indexed.as_ref().unwrap();
+        assert_eq!(index.tools.seed_display(0..=u64::MAX).unwrap().len(), 164);
+        assert_seed_matches_dense(&storage.open_session_for_observation(&info).unwrap());
         let prepared = loaded
             .history
             .prepare(&info.id, &loaded.timeline, None)

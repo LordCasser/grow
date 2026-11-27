@@ -63,6 +63,12 @@ writer/quarantine 的最终核对；客户端不能提前发 Cancel/Kill。错�
 owner 保存草稿并退休旧树，再显式 resume。成功 Stay 同样退休 matching views，
 保留无关 picker/页面。见 [删除结果收敛](../openspec/specs/client-surfaces/spec.md#requirement-session-deletion-reconciles-runtime-and-local-views-on-every-outcome)。
 
+实时启动子代理时，Shell 在 `SubagentSpawned` 中发送已提交的任务提示、实际 cwd、worktree 路径和子会话是否有待回放的展示记录。Pager 直接建立 child view。新建和上下文 fork 的子会话可以直接接收首条输入。恢复委派先在 Shell 的 blocking worker 校验来源。有继承正文时，Shell 在首条实时输入前记录子 journal 的字节边界并随启动通知发送。Pager 在后台读取并投影这一段，然后将正文插入实时消息之前。父会话按委派 ID 倒序定位结束和启动记录，再从 journal 核对归属与结果引用。来源子会话从主会话恢复使用的工作快照和历史索引提取模型上下文、完整继承展示与结果。索引不可用时读取同一提交边界的原日志。读取量和内存见[并发恢复测量](../openspec/changes/archive/2026-11-27-optimize-indexed-subagent-resume/measurements.md)。启动与恢复的行为见[子代理启动契约](../openspec/specs/client-surfaces/spec.md#requirement-live-subagent-launch-does-not-reread-parent-history)、[继承正文加载](../openspec/specs/client-surfaces/spec.md#requirement-live-resumed-child-history-loads-without-blocking-interaction) 和 [恢复校验契约](../openspec/specs/session-timeline/spec.md#requirement-subagent-resume-source-validation-yields-the-shell-executor)。
+
+主会话的普通日志写入串行等待持久化回执。即使 Shell 在恢复长委派时延迟处理写入，ChatState 也会保留当前事件和序号，等确认后再接纳下一条。实际 I/O 错误和丢失回执仍受重试预算约束。带显式期限的操作在派发前过期时只拒绝该次操作，派发后超时则保留待核对的写入身份。见[主会话写入确认契约](../openspec/specs/session-timeline/spec.md#requirement-ordinary-persistence-acknowledgements-preserve-the-resident-writer)。
+
+已打开的主会话收到 Shell 对当前输入或模型选择的明确会话缺失响应时，Pager 会按原 ID、cwd 和权限模式原地执行 `session/load`。被拒绝的输入保存在草稿或待检查队列，可在恢复后确认发送。Session Info 显示 Shell 的查询来源、状态和具体原因。现场排查可在统一日志中按会话 ID 对照 `shell.session.actor_exited` 和 `agent response failed`。[会话恢复契约](../openspec/specs/client-surfaces/spec.md#requirement-an-open-primary-session-recovers-from-a-missing-runtime-handle)
+
 主会话 resume 后，child transcript 在首次打开或首条实时正文/展示事件到达时恢复；
 必须先重放任务 prompt 与已有执行记录，再接收自动续跑的 Thinking、正文、工具或终态，
 避免新内容阻止 deferred replay。纯历史与控制快照仍保留延迟加载。

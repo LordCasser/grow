@@ -47,6 +47,7 @@ fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
     );
     ActorGuard {
         handle: PersistenceHandle {
+            writer_journal: Default::default(),
             tx,
             noop: false,
             task: Some(task.abort_handle()),

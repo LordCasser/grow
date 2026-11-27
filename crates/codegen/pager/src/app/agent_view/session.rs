@@ -110,6 +110,7 @@ impl AgentView {
     ) {
         if self.session.session_id.as_ref() != Some(&session_id) {
             self.retire_history_window();
+            self.child_seed_history = None;
             if self.session.plan_completed {
                 self.clear_completed_plan_details();
             }
@@ -148,6 +149,7 @@ impl AgentView {
         if self.session.session_id.take().is_some() {
             self.session.reset_behavior_binding();
             self.retire_history_window();
+            self.child_seed_history = None;
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.descendant_restore_generation = self.descendant_restore_generation.wrapping_add(1);
             self.descendant_restore_pending = false;
@@ -235,6 +237,7 @@ impl AgentView {
             session_binding_epoch: 0,
             descendant_restore_generation: 0,
             descendant_restore_pending: false,
+            child_seed_history: None,
             descendant_model_control_generation: 0,
             descendant_agent_control_generation: 0,
             history_page_cursor: None,
@@ -499,6 +502,10 @@ impl AgentView {
                 || self.active_subagent.as_deref() == Some(sid.as_str())
                 || !child.session.state.is_idle()
                 || child.session.loading_replay
+                || child
+                    .child_seed_history
+                    .as_ref()
+                    .is_some_and(|seed| !seed.is_failed())
                 || child.session_reload.is_some()
                 || child.session.tracker.has_unconfirmed_sampling_preview()
                 || child.block_viewer.is_some()
@@ -510,6 +517,7 @@ impl AgentView {
             {
                 continue;
             }
+            child.child_seed_history = None;
             child.reset_inline_media_loader();
             child.reset_edit_hl_runtime();
             child.scrollback = child.scrollback.fresh_continuation();
@@ -615,6 +623,13 @@ impl AgentView {
         }
     }
 
+    pub(crate) fn child_transcript_is_stashed(&self, child_sid: &str) -> bool {
+        self.session_reload
+            .as_ref()
+            .and_then(|reload| reload.child_sampling_stashes.get(child_sid))
+            .is_some_and(|stash| stash.scrollback.is_some())
+    }
+
     /// Stage only child transcript state that still contains a provisional
     /// sampler preview. Child view/session identity remains live so routing
     /// and controls keep their stable ownership during root replay.
@@ -701,6 +716,7 @@ impl AgentView {
             {
                 info.child_updates_replayed = child_updates_replayed;
             }
+            crate::app::subagent::install_seed_after_reload(child, &child_sid);
             child.resolve_sampling_children(stash.descendants, success);
         }
     }

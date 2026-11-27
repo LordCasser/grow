@@ -12,7 +12,9 @@
 //!   so that edits, bash commands, and file reads go through the same backends.
 use crate::agent::config::{resolve_credentials, sampling_config_for_model};
 use crate::agent::subagent::resolution::ResumeSourceData;
-use crate::extensions::notification::{SessionNotification, SessionUpdate};
+use crate::extensions::notification::{
+    SessionNotification, SessionUpdate, SubagentSpawnDetails, SubagentSpawnHistory,
+};
 use crate::session::events::CancellationCategory;
 use crate::session::{
     self, SessionCommand, SessionHandle, SessionThread,
@@ -64,6 +66,7 @@ pub(crate) enum InitialContextSource {
 /// Avoids passing `&MvpAgent` (which would require the coordinator to know
 /// about the full agent struct). Built by `MvpAgent::build_subagent_spawn_context()`.
 pub(crate) struct SubagentSpawnContext {
+    pub parent_journal: crate::session::storage::jsonl::WriterJournal,
     pub storage_admission: std::sync::Arc<crate::session::storage_admission::StorageAdmission>,
     pub parent_control_epoch: String,
     pub sampling_output_delivery: sampler::OutputDelivery,
@@ -1245,7 +1248,7 @@ enum BootstrapInitialContext {
 /// Unresolved non-empty resume is aborted by the caller before this runs.
 async fn bootstrap_initial_context(
     request: &SubagentRequest,
-    resume_source: Option<&DurableResumeSource>,
+    resume_initial: Option<Result<InitialContext, String>>,
     ctx: &SubagentSpawnContext,
     child_context_window: u64,
 ) -> BootstrapInitialContext {
@@ -1253,57 +1256,12 @@ async fn bootstrap_initial_context(
         tracing::info!(
             subagent_id = %request.id,
             resume_from = ?request.resume_from,
-            resume_resolved = resume_source.is_some(),
+            resume_resolved = resume_initial.is_some(),
             "resume_from and fork_context both set; resolved resume wins (fail-closed on copy error, never forks)"
         );
     }
-    if let Some(resolved) = resume_source {
-        let source = &resolved.data;
-        let timeline = &resolved.validated.timeline;
-        if timeline.surface().is_empty() {
-            return BootstrapInitialContext::Abort(format!(
-                "Cannot resume from subagent '{}': source Surface is empty",
-                source.subagent_id,
-            ));
-        }
-        let conversation = timeline.surface().to_vec();
-        let source_ref = chat_state::TimelineRangeRef {
-            timeline_id: source.child_session_id.clone(),
-            first_seq: 0,
-            last_seq: timeline
-                .events()
-                .last()
-                .expect("nonempty Surface has an event")
-                .seq
-                .get(),
-        };
-        let history = match resolved.validated.history.prepare(
-            &acp::SessionId::new(source.child_session_id.clone()),
-            timeline,
-            None,
-        ) {
-            Ok(history) => history,
-            Err(error) => {
-                return BootstrapInitialContext::Abort(format!(
-                    "Cannot resume from subagent '{}': source history projection failed: {error}",
-                    source.subagent_id,
-                ));
-            }
-        };
-        // The child turn owns context admission after projecting its actual
-        // request, including any compaction before sampling.
-        tracing::info!(
-            subagent_id = %request.id,
-            source_subagent = %source.subagent_id,
-            surface_items = conversation.len(),
-            "Materialized frozen resume source without publishing the child session"
-        );
-        let mut context = resume_initial_context_with_ref(conversation, source_ref);
-        context.presentation = crate::session::history::SeedPresentation::for_resume(
-            timeline.surface_ids().to_vec(),
-            history.updates,
-        );
-        return match freeze_initial_prompt_blobs(context, Some(resolved.session.directory())) {
+    if let Some(initial) = resume_initial {
+        return match initial {
             Ok(context) => BootstrapInitialContext::Ready(context),
             Err(error) => BootstrapInitialContext::Abort(error),
         };
@@ -1499,27 +1457,61 @@ fn select_override_cwd<'a>(
         request_cwd
     }
 }
-fn durable_resume_source_for(
+async fn durable_resume_source_for(
+    grow_home: PathBuf,
+    id: String,
+    parent_session_id: String,
+    requester_security_parent_session_id: String,
+    owner: Option<(
+        crate::session::storage::jsonl::WriterJournal,
+        chat_state::ChatStateHandle,
+    )>,
+) -> Result<DurableResumeSource, DurableResumeSourceError> {
+    let owner = match owner {
+        Some((journal, state)) => state
+            .subagent_operation_at_cut(id.clone())
+            .await
+            .ok()
+            .flatten()
+            .map(|operation| (journal, operation)),
+        None => None,
+    };
+    tokio::task::spawn_blocking(move || {
+        read_durable_resume_source(
+            grow_home,
+            &id,
+            &parent_session_id,
+            &requester_security_parent_session_id,
+            owner.as_ref(),
+        )
+    })
+    .await
+    .map_err(|error| DurableResumeSourceError::ValidationWorker(error.to_string()))?
+}
+
+fn read_durable_resume_source(
+    grow_home: PathBuf,
     id: &str,
     parent_session_id: &str,
     requester_security_parent_session_id: &str,
+    owner: Option<&(
+        crate::session::storage::jsonl::WriterJournal,
+        chat_state::timeline::SubagentOperationAtCut,
+    )>,
 ) -> Result<DurableResumeSource, DurableResumeSourceError> {
-    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
-        crate::util::grow_home::grow_home(),
-    );
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(grow_home);
     // Lifecycle ownership is keyed by the root session id. The immediate
     // delegation cwd is a workspace confinement input, never part of that
     // durable identity; nested children may legitimately run in a subdir or
     // worktree while their spawn fact remains in the root Timeline.
     let parent = storage
-        .open_session_by_id(parent_session_id)
+        .open_session_by_id_shared_read(parent_session_id)
         .map_err(|error| DurableResumeSourceError::ParentOpen(error.to_string()))?
         .ok_or(DurableResumeSourceError::ParentMissing)?;
-    let timeline = parent
-        .validated_timeline(parent_session_id)
-        .map_err(|error| DurableResumeSourceError::ParentTimeline(error.to_string()))?
-        .timeline;
-    let (spawn_seq, spawn, terminal) = resume_source_facts_from_timeline(&timeline, id)?;
+    let operation = parent
+        .resume_subagent_operation(id, owner)
+        .map_err(|error| DurableResumeSourceError::ParentTimeline(error.to_string()))?;
+    let (spawn_seq, spawn, terminal) = completed_resume_operation(operation)?;
     if !resume_security_parent_allows(
         parent_session_id,
         requester_security_parent_session_id,
@@ -1528,7 +1520,7 @@ fn durable_resume_source_for(
         return Err(DurableResumeSourceError::SecurityParentMismatch);
     }
     let child_session = storage
-        .open_session_by_id(&spawn.child_session_id)
+        .open_session_by_id_shared_read(&spawn.child_session_id)
         .map_err(|error| DurableResumeSourceError::ChildOpen(error.to_string()))?
         .ok_or(DurableResumeSourceError::ChildMissing)?;
     let summary = child_session.summary();
@@ -1541,35 +1533,58 @@ fn durable_resume_source_for(
     {
         return Err(DurableResumeSourceError::ChildIdentityMismatch);
     }
-    let child = child_session
-        .validated_timeline(&spawn.child_session_id)
-        .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?;
-    child
-        .timeline
-        .validate_subagent_result_link(parent_session_id, spawn_seq, spawn, terminal)
-        .map_err(|error| DurableResumeSourceError::ResultLink(error.to_string()))?;
-    let mut data = resume_source_from_facts(spawn, terminal);
-    if let Some((model_id, effort, _, transport)) =
-        session::persistence::latest_model_selection(child.timeline.events())
-            .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?
-    {
-        // Spawn is the immutable birth selection. A completed source may have
-        // accepted model controls since then; resume retains its last durable
-        // route without changing any source facts.
-        data.model_id = model_id.0.to_string();
-        data.reasoning_effort = effort;
-        data.model_transport_key = transport;
-    }
-    data.child_cwd = summary.info.cwd.clone();
-    Ok(DurableResumeSource {
-        data,
-        session: child_session,
-        validated: child,
-    })
+    child_session
+        .with_resume_timeline(|child| {
+            child
+                .timeline
+                .validate_subagent_result_link(parent_session_id, spawn_seq, &spawn, &terminal)
+                .map_err(|error| DurableResumeSourceError::ResultLink(error.to_string()))?;
+            let mut data = resume_source_from_facts(&spawn, &terminal);
+            if let Some((model_id, effort, _, transport)) =
+                session::persistence::current_model_selection(child.timeline.events())
+                    .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?
+            {
+                data.model_id = model_id.0.to_string();
+                data.reasoning_effort = effort;
+                data.model_transport_key = transport;
+            }
+            data.child_cwd = summary.info.cwd.clone();
+            let timeline = child.timeline;
+            let initial = if timeline.surface().is_empty() {
+                Err(format!(
+                    "Cannot resume from subagent '{}': source Surface is empty",
+                    data.subagent_id
+                ))
+            } else {
+                let history = child
+                    .history
+                    .prepare_for_seed(&summary.info.id, &timeline)
+                    .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?;
+                let source_ref = chat_state::TimelineRangeRef {
+                    timeline_id: data.child_session_id.clone(),
+                    first_seq: 0,
+                    last_seq: timeline
+                        .last_seq()
+                        .expect("nonempty Surface has an event")
+                        .get(),
+                };
+                let mut context =
+                    resume_initial_context_with_ref(timeline.surface().to_vec(), source_ref);
+                context.presentation = crate::session::history::SeedPresentation::for_resume(
+                    timeline.surface_ids().to_vec(),
+                    history,
+                );
+                freeze_initial_prompt_blobs(context, Some(child_session.directory()))
+            };
+            Ok(DurableResumeSource { data, initial })
+        })
+        .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 enum DurableResumeSourceError {
+    #[error("source validation worker failed: {0}")]
+    ValidationWorker(String),
     #[error("parent session is missing")]
     ParentMissing,
     #[error("parent session could not be opened: {0}")]
@@ -1607,7 +1622,8 @@ impl DurableResumeSourceError {
             Self::ParentMissing | Self::ChildMissing => {
                 "the source session is unavailable in local storage".to_owned()
             }
-            Self::ParentOpen(_)
+            Self::ValidationWorker(_)
+            | Self::ParentOpen(_)
             | Self::ParentTimeline(_)
             | Self::ChildOpen(_)
             | Self::ChildTimeline(_) => {
@@ -1632,52 +1648,25 @@ fn resume_security_parent_allows(
 
 struct DurableResumeSource {
     data: ResumeSourceData,
-    session: crate::session::storage::jsonl::OpenedSession,
-    validated: crate::session::storage::jsonl::ValidatedTimeline,
+    initial: Result<InitialContext, String>,
 }
 
-impl std::ops::Deref for DurableResumeSource {
-    type Target = ResumeSourceData;
-
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-
-fn resume_source_facts_from_timeline<'a>(
-    timeline: &'a chat_state::Timeline,
-    id: &str,
+fn completed_resume_operation(
+    operation: Option<chat_state::timeline::SubagentOperation>,
 ) -> Result<
     (
         chat_state::EventSeq,
-        &'a chat_state::SubagentSpawnEvent,
-        &'a chat_state::SubagentTerminalEvent,
+        chat_state::SubagentSpawnEvent,
+        chat_state::SubagentTerminalEvent,
     ),
     DurableResumeSourceError,
 > {
-    let (spawn_seq, spawn) =
-        timeline
-            .events()
-            .iter()
-            .find_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
-                    spawn,
-                )) if spawn.subagent_id == id => Some((event.seq, spawn)),
-                _ => None,
-            })
-            .ok_or(DurableResumeSourceError::SpawnMissing)?;
-    let terminal =
-        timeline
-            .events()
-            .iter()
-            .find_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
-                    terminal,
-                )) if terminal.subagent_id == id => Some(terminal),
-                _ => None,
-            })
-            .ok_or(DurableResumeSourceError::TerminalMissing)?;
-    Ok((spawn_seq, spawn, terminal))
+    let (seq, spawn, terminal) = operation.ok_or(DurableResumeSourceError::SpawnMissing)?;
+    Ok((
+        seq,
+        spawn,
+        terminal.ok_or(DurableResumeSourceError::TerminalMissing)?,
+    ))
 }
 
 fn resume_source_from_facts(
@@ -1702,8 +1691,8 @@ fn resume_source_from_timeline(
     timeline: &chat_state::Timeline,
     id: &str,
 ) -> Option<ResumeSourceData> {
-    let (_, spawn, terminal) = resume_source_facts_from_timeline(timeline, id).ok()?;
-    Some(resume_source_from_facts(spawn, terminal))
+    let (_, spawn, terminal) = timeline.subagent_operation(id).ok()??;
+    Some(resume_source_from_facts(&spawn, &terminal?))
 }
 /// Resolve the MCP pool a child subagent should import from its parent.
 ///
@@ -3226,6 +3215,10 @@ pub(crate) fn spawn_from_fact(
     let (model_state, workflow_agent_names) = workflow_projection.unzip();
     SessionUpdate::SubagentSpawned {
         subagent_id: spawn.subagent_id.clone(),
+        spawn_details: Some(SubagentSpawnDetails::from_spawn(
+            spawn,
+            SubagentSpawnHistory::Durable,
+        )),
         child_session_id: spawn.child_session_id.clone(),
         parent_session_id: parent_session_id.to_string(),
         parent_prompt_id: spawn.parent_prompt_id.clone(),
